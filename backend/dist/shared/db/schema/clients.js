@@ -1,0 +1,30 @@
+import { boolean, index, integer, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+/** Cliente comercial (arena) — token/QR para o app Android. */
+export const clients = pgTable("clients", {
+    id: uuid("id").defaultRandom().primaryKey(),
+    cnpj: text("cnpj").notNull().unique(),
+    razaoSocial: text("razao_social").notNull().default(""),
+    nomeFantasia: text("nome_fantasia").notNull(),
+    addrCep: text("addr_cep").notNull().default(""),
+    addrStreet: text("addr_street").notNull().default(""),
+    addrNumber: text("addr_number").notNull().default(""),
+    addrComplement: text("addr_complement").notNull().default(""),
+    addrNeighborhood: text("addr_neighborhood").notNull().default(""),
+    addrCity: text("addr_city").notNull().default(""),
+    addrState: text("addr_state").notNull().default(""),
+    phone: text("phone").notNull().default(""),
+    email: text("email").notNull().default(""),
+    plan: text("plan").notNull().default("ATE_5_QUADRAS"),
+    billingType: text("billing_type").notNull().default("MENSAL"),
+    planValueCents: integer("plan_value_cents").notNull().default(0),
+    kitsSold: integer("kits_sold").notNull().default(0),
+    commercialStatus: text("commercial_status").notNull().default("ATIVO"),
+    qrToken: text("qr_token").notNull().unique(),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+    qrTokenIdx: index("idx_clients_qr_token").on(table.qrToken),
+    isActiveIdx: index("idx_clients_is_active").on(table.isActive),
+    cnpjIdx: index("idx_clients_cnpj").on(table.cnpj),
+}));

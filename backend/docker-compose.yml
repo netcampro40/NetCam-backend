@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: netcam-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: netcam
+    ports:
+      - "5432:5432"
+    volumes:
+      - netcam_pg_data:/var/lib/postgresql/data
+
+volumes:
+  netcam_pg_data:
