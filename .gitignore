@@ -13,3 +13,12 @@
 .externalNativeBuild
 .cxx
 local.properties
+# Node (backend)
+node_modules/
+backend/node_modules/
+# Env
+.env
+# Logs
+*.log
+# Build backend
+backend/dist/
