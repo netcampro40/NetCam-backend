@@ -44,6 +44,7 @@ function toIso(value: unknown): string {
 function serializeClip(row: VideoClipRow) {
   return {
     id: row.id,
+    clipId: row.id,
     clientId: row.clientId,
     qrCodeId: row.qrCodeId,
     arenaName: row.arenaName,
@@ -67,6 +68,7 @@ function serializeClip(row: VideoClipRow) {
 function serializeGalleryClip(row: VideoClipRow) {
   return {
     id: row.id,
+    clipId: row.id,
     recordedAt: toIso(row.recordedAt),
     uploadedAt: toIso(row.uploadedAt),
     durationSeconds: row.durationSeconds,
@@ -385,7 +387,7 @@ export async function clipsRoutes(app: FastifyInstance) {
         "clip_saved_to_database",
       );
 
-      return reply.status(201).send({ clip: serializeClip(row) });
+      return reply.status(201).send({ clipId: row.id, clip: serializeClip(row) });
     } catch (e) {
       request.log.error(
         { err: e, clientId: access.clientId, clipId, fileKey },
