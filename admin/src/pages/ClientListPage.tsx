@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 import {
   listClients,
-  patchClient,
-  regenerateClientToken,
+  patchClientQrCode,
+  regenerateClientQrCodeToken,
   type Client,
+  type ClientQrCode,
 } from "../api";
 import { QrModal } from "../components/QrModal";
 import { formatCnpjDisplay, onlyDigits } from "../utils/cnpj";
@@ -24,6 +25,12 @@ const PLAN_LABELS: Record<string, string> = {
 
 type CommercialFilter = "all" | "ATIVO" | "INATIVO";
 
+type QrModalState = {
+  clientName: string;
+  qrToken: string;
+  label: string;
+};
+
 function matchesSearch(c: Client, rawQuery: string): boolean {
   const q = rawQuery.trim();
   if (!q) return true;
@@ -34,14 +41,26 @@ function matchesSearch(c: Client, rawQuery: string): boolean {
   return cnpjMatch || nameMatch;
 }
 
+function qrSummary(c: Client): string {
+  const codes = c.qrCodes ?? [];
+  if (codes.length === 0) return "—";
+  const active = codes.filter((q) => q.isActive).length;
+  return `${active}/${codes.length} ativos`;
+}
+
 export function ClientListPage() {
+  const location = useLocation();
   const [clients, setClients] = useState<Client[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [success] = useState<string | null>(
+    (location.state as { flash?: string } | null)?.flash ?? null,
+  );
   const [search, setSearch] = useState("");
   const [commercialFilter, setCommercialFilter] = useState<CommercialFilter>("all");
-  const [qrModal, setQrModal] = useState<Client | null>(null);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const [qrModal, setQrModal] = useState<QrModalState | null>(null);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setError(null);
@@ -77,47 +96,122 @@ export function ClientListPage() {
     });
   }, [clients, commercialFilter, search]);
 
-  async function toggleActive(c: Client) {
-    setError(null);
-    const turningOn = !c.isActive;
-    if (turningOn && c.commercialStatus === "INATIVO") {
+  function toggleExpanded(clientId: string) {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(clientId)) next.delete(clientId);
+      else next.add(clientId);
+      return next;
+    });
+  }
+
+  async function copyToken(token: string, key: string) {
+    await navigator.clipboard.writeText(token);
+    setCopiedKey(key);
+    window.setTimeout(() => setCopiedKey(null), 2000);
+  }
+
+  async function toggleQrActive(client: Client, qr: ClientQrCode) {
+    if (!qr.isActive && client.commercialStatus === "INATIVO") {
       setError(
-        "Não é possível ativar o QR para cliente com cadastro inativo. Edite o cliente e marque o cadastro como Ativo.",
+        "Não é possível ativar QR de cliente com cadastro inativo. Edite o cliente e marque o cadastro como Ativo.",
       );
       return;
     }
+    setError(null);
     try {
-      await patchClient(c.id, { isActive: !c.isActive });
-      await refresh();
+      const { client: updated } = await patchClientQrCode(client.id, qr.id, {
+        isActive: !qr.isActive,
+      });
+      setClients((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Erro ao atualizar acesso");
+      setError(err instanceof Error ? err.message : "Erro ao atualizar QR");
     }
   }
 
-  async function regen(c: Client) {
+  async function regenQr(client: Client, qr: ClientQrCode) {
     const msg =
-      `Regenerar o token de "${c.nomeFantasia}"?\n\n` +
+      `Regenerar o token de "${qr.label}" (${client.nomeFantasia})?\n\n` +
       `• O token ATUAL deixa de valer.\n` +
-      `• QRs antigos param de funcionar no app.\n\n` +
+      `• O QR antigo para de funcionar no app.\n\n` +
       `Continuar?`;
     if (!confirm(msg)) return;
     setError(null);
     try {
-      await regenerateClientToken(c.id);
-      await refresh();
+      const { client: updated } = await regenerateClientQrCodeToken(client.id, qr.id);
+      setClients((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao regenerar token");
     }
   }
 
-  async function copyToken(token: string, id: string) {
-    await navigator.clipboard.writeText(token);
-    setCopiedId(id);
-    window.setTimeout(() => setCopiedId(null), 2000);
+  function renderQrRow(client: Client, qr: ClientQrCode) {
+    const copyKey = `${client.id}-${qr.id}`;
+    const blocked = client.commercialStatus === "INATIVO";
+
+    return (
+      <tr key={qr.id} className="qr-expand-row">
+        <td colSpan={8}>
+          <div className="qr-expand-inner">
+            <span className="qr-expand-label">{qr.label}</span>
+            <span className="qr-expand-token">{qr.qrToken}</span>
+            <span>
+              {blocked ? (
+                <span className="tag tag-muted" title="Cadastro inativo">
+                  Bloqueado
+                </span>
+              ) : qr.isActive ? (
+                <span className="tag tag-ok">Ativo</span>
+              ) : (
+                <span className="tag tag-warn">Inativo</span>
+              )}
+            </span>
+            <div className="qr-expand-actions">
+              <button
+                type="button"
+                className="btn btn-tiny"
+                onClick={() => copyToken(qr.qrToken, copyKey)}
+              >
+                {copiedKey === copyKey ? "Copiado!" : "Copiar"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-tiny"
+                onClick={() =>
+                  setQrModal({
+                    clientName: client.nomeFantasia,
+                    qrToken: qr.qrToken,
+                    label: qr.label,
+                  })
+                }
+              >
+                Ver QR
+              </button>
+              <button
+                type="button"
+                className="btn btn-tiny"
+                onClick={() => toggleQrActive(client, qr)}
+                disabled={blocked && !qr.isActive}
+                title={blocked && !qr.isActive ? "Cadastro inativo" : undefined}
+              >
+                {qr.isActive ? "Desativar" : "Ativar"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-tiny btn-danger"
+                onClick={() => regenQr(client, qr)}
+              >
+                Regenerar
+              </button>
+            </div>
+          </div>
+        </td>
+      </tr>
+    );
   }
 
   return (
-    <div className="admin-page">
+    <div className="admin-page admin-page-wide">
       <header className="admin-header">
         <div>
           <h1>NetCamPro — Admin</h1>
@@ -132,18 +226,19 @@ export function ClientListPage() {
         <strong>Resumo</strong>
         <ul>
           <li>
-            O <strong>token</strong> é o conteúdo do QR lido pelo app; <strong>Desativar</strong> bloqueia a validação no
-            servidor mesmo com token correto.
+            Informe a <strong>quantidade de kits</strong> na ficha do cliente e use o botão{" "}
+            <strong>Gerar QR Codes</strong> para criar os tokens de acesso.
           </li>
           <li>
-            <strong>Status</strong> na lista é o cadastro comercial (ativo/inativo). O acesso QR usa &quot;Ativar /
-            Desativar&quot; nas ações. Com cadastro inativo, o QR não pode ficar ativo.
+            A lista principal mostra uma linha por cliente. Use a <strong>seta</strong> no fim da
+            linha para ver e gerenciar cada QR individualmente.
           </li>
           <li>Clique no <strong>CNPJ</strong> para abrir a ficha completa do cliente.</li>
         </ul>
       </aside>
 
       {error && <div className="admin-error">{error}</div>}
+      {success && <div className="admin-success">{success}</div>}
 
       <section className="admin-card">
         <h2>Clientes</h2>
@@ -199,81 +294,75 @@ export function ClientListPage() {
                   <th>Plano</th>
                   <th>Status</th>
                   <th>Kits</th>
-                  <th>Token atual</th>
-                  <th>Ações</th>
+                  <th className="col-expand" aria-label="Expandir QRs" />
                 </tr>
               </thead>
               <tbody>
-                {visibleClients.map((c) => (
-                  <tr key={c.id}>
-                    <td>
-                      <Link to={`/clients/${c.id}`} className="link-cnpj">
-                        {formatCnpjDisplay(c.cnpj)}
-                      </Link>
-                    </td>
-                    <td>{c.nomeFantasia}</td>
-                    <td className="cell-muted">{c.razaoSocial || "—"}</td>
-                    <td className="cell-muted">{formatListLocation(c)}</td>
-                    <td>{PLAN_LABELS[c.plan] ?? c.plan}</td>
-                    <td>
-                      <span className={c.commercialStatus === "ATIVO" ? "tag tag-ok" : "tag tag-off"}>
-                        {c.commercialStatus === "ATIVO" ? "Ativo" : "Inativo"}
-                      </span>
-                      {c.commercialStatus === "INATIVO" ? (
-                        <span className="tag tag-muted" title="Cadastro inativo: QR não pode validar no app">
-                          QR bloqueado
-                        </span>
-                      ) : !c.isActive ? (
-                        <span className="tag tag-warn" title="Token / QR desligado no servidor">
-                          QR off
-                        </span>
-                      ) : (
-                        <span className="tag tag-ok tag-subtle" title="QR ativo no servidor">
-                          QR on
-                        </span>
-                      )}
-                    </td>
-                    <td>{c.kitsSold}</td>
-                    <td>
-                      <div className="token-cell">{c.qrToken}</div>
-                      <button
-                        type="button"
-                        className="btn btn-tiny"
-                        onClick={() => copyToken(c.qrToken, c.id)}
-                      >
-                        {copiedId === c.id ? "Copiado!" : "Copiar"}
-                      </button>
-                    </td>
-                    <td className="cell-actions">
-                      <button type="button" className="btn btn-tiny" onClick={() => setQrModal(c)}>
-                        Ver QR
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-tiny"
-                        onClick={() => toggleActive(c)}
-                        disabled={c.commercialStatus === "INATIVO" && !c.isActive}
-                        title={
-                          c.commercialStatus === "INATIVO" && !c.isActive
-                            ? "Cadastro inativo: não é possível ativar o QR"
-                            : undefined
-                        }
-                      >
-                        {c.isActive ? "Desativar QR" : "Ativar QR"}
-                      </button>
-                      <button type="button" className="btn btn-tiny btn-danger" onClick={() => regen(c)}>
-                        Novo token
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {visibleClients.map((c) => {
+                  const expanded = expandedIds.has(c.id);
+                  const qrCodes = c.qrCodes ?? [];
+                  return (
+                    <Fragment key={c.id}>
+                      <tr className={expanded ? "client-row-expanded" : undefined}>
+                        <td>
+                          <Link to={`/clients/${c.id}`} className="link-cnpj">
+                            {formatCnpjDisplay(c.cnpj)}
+                          </Link>
+                        </td>
+                        <td>{c.nomeFantasia}</td>
+                        <td className="cell-muted">{c.razaoSocial || "—"}</td>
+                        <td className="cell-muted">{formatListLocation(c)}</td>
+                        <td>{PLAN_LABELS[c.plan] ?? c.plan}</td>
+                        <td>
+                          <span className={c.commercialStatus === "ATIVO" ? "tag tag-ok" : "tag tag-off"}>
+                            {c.commercialStatus === "ATIVO" ? "Ativo" : "Inativo"}
+                          </span>
+                          {qrCodes.length > 0 && (
+                            <span className="tag tag-muted tag-subtle" title="QR Codes ativos / total">
+                              {qrSummary(c)}
+                            </span>
+                          )}
+                        </td>
+                        <td>{c.kitsSold}</td>
+                        <td className="col-expand">
+                          {qrCodes.length > 0 ? (
+                            <button
+                              type="button"
+                              className="btn-expand"
+                              onClick={() => toggleExpanded(c.id)}
+                              aria-expanded={expanded}
+                              aria-label={
+                                expanded
+                                  ? `Ocultar QR Codes de ${c.nomeFantasia}`
+                                  : `Mostrar QR Codes de ${c.nomeFantasia}`
+                              }
+                              title={expanded ? "Ocultar QR Codes" : "Mostrar QR Codes"}
+                            >
+                              {expanded ? "▲" : "▼"}
+                            </button>
+                          ) : (
+                            <span className="cell-muted">—</span>
+                          )}
+                        </td>
+                      </tr>
+                      {expanded && qrCodes.map((qr) => renderQrRow(c, qr))}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
       </section>
 
-      {qrModal && <QrModal client={qrModal} onClose={() => setQrModal(null)} />}
+      {qrModal && (
+        <QrModal
+          title={qrModal.clientName}
+          qrToken={qrModal.qrToken}
+          label={qrModal.label}
+          onClose={() => setQrModal(null)}
+        />
+      )}
     </div>
   );
 }

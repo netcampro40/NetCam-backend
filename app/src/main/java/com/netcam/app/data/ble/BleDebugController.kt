@@ -21,13 +21,16 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -56,9 +59,7 @@ data class BleDebugUiState(
     val connectedDeviceAddress: String? = null,
     val lastCommand: String? = null,
     val commandHistory: List<String> = emptyList(),
-    /** 0–100 quando o controle BLE envia leitura (ex.: notificação `BATTERY:87`). */
     val batteryPercent: Int? = null,
-    /** true quando o protocolo sinaliza que não há leitura (ex.: `BATTERY:NA`). */
     val batteryExplicitlyUnavailable: Boolean = false,
 )
 
@@ -81,11 +82,20 @@ class BleDebugController(
     private var autoConnectEnabled = false
     private var lastHandledPayload: String? = null
     private var lastHandledAtMs: Long = 0L
+    private var scanStartedAtMs: Long = 0L
+    private var connectStartedAtMs: Long = 0L
+    private var scanTimeoutJob: Job? = null
+    private var connectTimeoutJob: Job? = null
+    private var watchdogJob: Job? = null
 
     private val _uiState = MutableStateFlow(BleDebugUiState())
     val uiState: StateFlow<BleDebugUiState> = _uiState.asStateFlow()
     private val _clipCommands = MutableSharedFlow<BleClipCommand>(extraBufferCapacity = 16)
     val clipCommands: SharedFlow<BleClipCommand> = _clipCommands.asSharedFlow()
+
+    init {
+        ensureWatchdogRunning()
+    }
 
     fun requiredRuntimePermissions(): List<String> {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -102,6 +112,11 @@ class BleDebugController(
     }
 
     fun isBluetoothEnabled(): Boolean = bluetoothAdapter?.isEnabled == true
+
+    /** Chamado ao abrir a tela de pareamento — recupera scan/conexão presos. */
+    fun onPairingScreenVisible() {
+        recoverStuckStates("pairing_screen_enter")
+    }
 
     @SuppressLint("MissingPermission")
     fun startScan() {
@@ -122,9 +137,10 @@ class BleDebugController(
             return
         }
 
-        stopScan()
+        stopScan("restart")
         foundDevice = null
         isScanning = true
+        scanStartedAtMs = System.currentTimeMillis()
         _uiState.value =
             _uiState.value.copy(
                 status = BleDebugStatus.SCANNING,
@@ -132,15 +148,18 @@ class BleDebugController(
                 foundDeviceName = null,
                 foundDeviceAddress = null,
             )
-        Log.d(TAG, "BLE scan iniciado")
+        logBle("SCAN_START")
+        scheduleScanTimeout()
         val settings =
             ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
                 .build()
         runCatching {
             scanner.startScan(null, settings, scanCallback)
-        }.onFailure {
-            emitError("Falha ao iniciar scan BLE")
+        }.onFailure { error ->
+            isScanning = false
+            cancelScanTimeout()
+            emitError("Falha ao iniciar scan BLE: ${error.message ?: "erro desconhecido"}")
         }
     }
 
@@ -152,7 +171,7 @@ class BleDebugController(
 
     fun stopAutoConnect(keepConnection: Boolean = true) {
         autoConnectEnabled = false
-        stopScan()
+        stopScan("auto_connect_stop")
         if (!keepConnection) {
             disconnect()
         }
@@ -161,11 +180,12 @@ class BleDebugController(
     fun isConnected(): Boolean = _uiState.value.status == BleDebugStatus.CONNECTED
 
     @SuppressLint("MissingPermission")
-    fun stopScan() {
+    fun stopScan(reason: String = "manual") {
         if (!isScanning) return
         runCatching { bluetoothAdapter?.bluetoothLeScanner?.stopScan(scanCallback) }
         isScanning = false
-        Log.d(TAG, "BLE scan parado")
+        cancelScanTimeout()
+        logBle("SCAN_STOP", "reason=$reason")
     }
 
     @SuppressLint("MissingPermission")
@@ -180,14 +200,16 @@ class BleDebugController(
             return
         }
 
-        stopScan()
-        disconnect()
+        stopScan("connect")
+        disconnectGattOnly()
+        connectStartedAtMs = System.currentTimeMillis()
         _uiState.value =
             _uiState.value.copy(
                 status = BleDebugStatus.CONNECTING,
                 statusMessage = "Conectando em ${device.name ?: device.address}...",
             )
-        Log.d(TAG, "Conectando em ${device.address}")
+        logBle("CONNECT_START", "address=${device.address}")
+        scheduleConnectTimeout()
         gatt =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 device.connectGatt(appContext, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
@@ -198,10 +220,7 @@ class BleDebugController(
 
     @SuppressLint("MissingPermission")
     fun disconnect() {
-        val current = gatt
-        gatt = null
-        runCatching { current?.disconnect() }
-        runCatching { current?.close() }
+        disconnectGattOnly()
         _uiState.value =
             _uiState.value.copy(
                 status = BleDebugStatus.DISCONNECTED,
@@ -211,15 +230,125 @@ class BleDebugController(
                 batteryPercent = null,
                 batteryExplicitlyUnavailable = false,
             )
+        logBle("DISCONNECTED", "reason=manual")
+    }
+
+    fun recoverStuckStates(context: String) {
+        val status = _uiState.value.status
+        val now = System.currentTimeMillis()
+
+        if (status == BleDebugStatus.SCANNING) {
+            val elapsed = now - scanStartedAtMs
+            if (elapsed > SCAN_TIMEOUT_MS || !isScanning) {
+                logBle("SCAN_TIMEOUT", "recover context=$context elapsedMs=$elapsed")
+                stopScan("recover_stuck_scan")
+                _uiState.value =
+                    _uiState.value.copy(
+                        status = BleDebugStatus.DISCONNECTED,
+                        statusMessage = "Scan expirou. Toque em Procurar controle para tentar novamente.",
+                    )
+            }
+        }
+
+        if (status == BleDebugStatus.CONNECTING) {
+            val elapsed = now - connectStartedAtMs
+            if (elapsed > CONNECT_TIMEOUT_MS) {
+                logBle("CONNECT_FAIL", "recover timeout context=$context elapsedMs=$elapsed")
+                disconnectGattOnly()
+                _uiState.value =
+                    _uiState.value.copy(
+                        status = BleDebugStatus.DISCONNECTED,
+                        statusMessage = "Conexão expirou. Tente novamente.",
+                    )
+            }
+        }
+
+        if (isScanning && status != BleDebugStatus.SCANNING) {
+            stopScan("recover_desync")
+        }
+    }
+
+    private fun ensureWatchdogRunning() {
+        if (watchdogJob?.isActive == true) return
+        watchdogJob =
+            scope.launch {
+                while (isActive) {
+                    delay(WATCHDOG_INTERVAL_MS)
+                    recoverStuckStates("watchdog")
+                }
+            }
+    }
+
+    private fun scheduleScanTimeout() {
+        cancelScanTimeout()
+        scanTimeoutJob =
+            scope.launch {
+                delay(SCAN_TIMEOUT_MS)
+                if (!isScanning || _uiState.value.status != BleDebugStatus.SCANNING) return@launch
+                logBle("SCAN_TIMEOUT")
+                stopScan("timeout")
+                _uiState.value =
+                    _uiState.value.copy(
+                        status = BleDebugStatus.DISCONNECTED,
+                        statusMessage = "Controle não encontrado. Toque em Procurar controle para tentar novamente.",
+                    )
+            }
+    }
+
+    private fun scheduleConnectTimeout() {
+        cancelConnectTimeout()
+        connectTimeoutJob =
+            scope.launch {
+                delay(CONNECT_TIMEOUT_MS)
+                if (_uiState.value.status != BleDebugStatus.CONNECTING) return@launch
+                logBle("CONNECT_FAIL", "timeout")
+                disconnectGattOnly()
+                _uiState.value =
+                    _uiState.value.copy(
+                        status = BleDebugStatus.DISCONNECTED,
+                        statusMessage = "Tempo esgotado ao conectar. Tente novamente.",
+                        connectedDeviceName = null,
+                        connectedDeviceAddress = null,
+                    )
+            }
+    }
+
+    private fun cancelScanTimeout() {
+        scanTimeoutJob?.cancel()
+        scanTimeoutJob = null
+    }
+
+    private fun cancelConnectTimeout() {
+        connectTimeoutJob?.cancel()
+        connectTimeoutJob = null
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun disconnectGattOnly() {
+        cancelConnectTimeout()
+        val current = gatt
+        gatt = null
+        runCatching { current?.disconnect() }
+        runCatching { current?.close() }
     }
 
     private fun emitError(message: String) {
+        stopScan("error")
+        cancelConnectTimeout()
         _uiState.value =
             _uiState.value.copy(
                 status = BleDebugStatus.ERROR,
                 statusMessage = message,
             )
-        Log.e(TAG, message)
+        Log.e(TAG, "[BLE] ERROR $message")
+    }
+
+    private fun logBle(event: String, detail: String = "") {
+        if (detail.isEmpty()) {
+            Log.d(TAG, "[BLE] $event")
+        } else {
+            Log.d(TAG, "[BLE] $event $detail")
+        }
     }
 
     private fun onCommandReceived(command: String) {
@@ -267,10 +396,6 @@ class BleDebugController(
         }
     }
 
-    /**
-     * Extensão não destrutiva do protocolo NetCamPro: notificações com carga do controle.
-     * Ex.: `BATTERY:87`, `BATTERY:NA`, `BAT 50`.
-     */
     private fun tryApplyBatteryPayload(payload: String): Boolean {
         val unavailable =
             Regex("""(?i)^(?:BATTERY|BAT)\s*[:=]\s*(NA|N/?A|NONE|UNAVAILABLE|INDISPONIVEL)\s*$""")
@@ -316,7 +441,7 @@ class BleDebugController(
                 if (!isTargetDevice(result)) return
 
                 foundDevice = result.device
-                stopScan()
+                stopScan("device_found")
                 _uiState.value =
                     _uiState.value.copy(
                         status = BleDebugStatus.FOUND,
@@ -324,9 +449,9 @@ class BleDebugController(
                         foundDeviceName = result.device.name ?: "Sem nome",
                         foundDeviceAddress = result.device.address,
                     )
-                Log.d(
-                    TAG,
-                    "Controle encontrado name=${result.device.name} address=${result.device.address} rssi=${result.rssi}",
+                logBle(
+                    "DEVICE_FOUND",
+                    "name=${result.device.name} address=${result.device.address} rssi=${result.rssi}",
                 )
                 if (autoConnectEnabled) {
                     connectToFound()
@@ -335,6 +460,8 @@ class BleDebugController(
 
             override fun onScanFailed(errorCode: Int) {
                 super.onScanFailed(errorCode)
+                isScanning = false
+                cancelScanTimeout()
                 emitError("Falha no scan BLE (code=$errorCode)")
             }
         }
@@ -345,6 +472,7 @@ class BleDebugController(
             override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
                 super.onConnectionStateChange(gatt, status, newState)
                 if (status != BluetoothGatt.GATT_SUCCESS) {
+                    logBle("CONNECT_FAIL", "gattStatus=$status newState=$newState")
                     emitError("Erro de conexão BLE (status=$status)")
                     runCatching { gatt.close() }
                     return
@@ -359,21 +487,25 @@ class BleDebugController(
                                 connectedDeviceName = gatt.device.name ?: "Sem nome",
                                 connectedDeviceAddress = gatt.device.address,
                             )
-                        Log.d(TAG, "BLE conectado em ${gatt.device.address}")
+                        logBle("CONNECT_SUCCESS", "address=${gatt.device.address} (discovering services)")
                         gatt.discoverServices()
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
-                _uiState.value =
-                    _uiState.value.copy(
-                        status = BleDebugStatus.DISCONNECTED,
-                        statusMessage = "Dispositivo desconectado",
-                        connectedDeviceName = null,
-                        connectedDeviceAddress = null,
-                        batteryPercent = null,
-                        batteryExplicitlyUnavailable = false,
-                    )
-                        Log.d(TAG, "BLE desconectado")
+                        cancelConnectTimeout()
+                        _uiState.value =
+                            _uiState.value.copy(
+                                status = BleDebugStatus.DISCONNECTED,
+                                statusMessage = "Dispositivo desconectado",
+                                connectedDeviceName = null,
+                                connectedDeviceAddress = null,
+                                batteryPercent = null,
+                                batteryExplicitlyUnavailable = false,
+                            )
+                        logBle("DISCONNECTED", "remote")
                         runCatching { gatt.close() }
+                        if (autoConnectEnabled && !isConnected()) {
+                            startScan()
+                        }
                     }
                 }
             }
@@ -448,6 +580,7 @@ class BleDebugController(
                     emitError("CCCD escrito sem valor de notify")
                     return
                 }
+                cancelConnectTimeout()
                 _uiState.value =
                     _uiState.value.copy(
                         status = BleDebugStatus.CONNECTED,
@@ -455,7 +588,7 @@ class BleDebugController(
                         batteryPercent = null,
                         batteryExplicitlyUnavailable = false,
                     )
-                Log.d(TAG, "BLE pronto para notifications")
+                logBle("CONNECT_SUCCESS", "notifications active address=${gatt.device.address}")
             }
 
             override fun onCharacteristicChanged(
@@ -484,5 +617,8 @@ class BleDebugController(
         private const val TAG = "NetCamBleDebug"
         private const val MAX_HISTORY = 20
         private const val COMMAND_DEDUP_WINDOW_MS = 350L
+        private const val SCAN_TIMEOUT_MS = 20_000L
+        private const val CONNECT_TIMEOUT_MS = 20_000L
+        private const val WATCHDOG_INTERVAL_MS = 3_000L
     }
 }

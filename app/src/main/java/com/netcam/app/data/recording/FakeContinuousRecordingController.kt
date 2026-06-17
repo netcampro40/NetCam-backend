@@ -22,5 +22,9 @@ class FakeContinuousRecordingController : ContinuousRecordingController {
     }
 
     override fun isBaseRecordingActive(): Boolean = active
+
+    override fun forceReleaseStaleRecording(reason: String) {
+        active = false
+    }
 }
 

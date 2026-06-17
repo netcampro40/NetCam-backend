@@ -3,7 +3,8 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-val netCamApiBaseUrl = (findProperty("NETCAM_API_BASE_URL") as String?) ?: "http://127.0.0.1:3333"
+val netCamApiBaseUrl =
+    (findProperty("NETCAM_API_BASE_URL") as String?) ?: "https://netcam-backend.onrender.com"
 
 android {
     namespace = "com.netcam.app"

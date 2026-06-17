@@ -2,7 +2,6 @@ import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env } from "../../../shared/config/env.js";
 import { normalizeCnpj } from "../../../shared/cnpj/normalizeCnpj.js";
-import { generateQrToken } from "../../../shared/security/generateQrToken.js";
 import { fetchCnpjFromBrasilApi } from "./brasilApiCnpj.js";
 import {
   deleteClientById,
@@ -14,6 +13,16 @@ import {
   updateClientQrToken,
   type ClientRow,
 } from "../../client/repository/client.admin.repository.js";
+import {
+  ensureClientQrCodesForKitCount,
+  findQrCodeById,
+  listQrCodesByClientId,
+  listQrCodesByClientIds,
+  updateQrCodeActive,
+  updateQrCodeToken,
+  type ClientQrCodeRow,
+} from "../../client/repository/clientQrCode.repository.js";
+import { generateUniqueQrToken } from "../../../shared/security/uniqueQrToken.js";
 
 const planSchema = z.enum(["ATE_5_QUADRAS", "ATE_10_QUADRAS", "ACIMA_10_QUADRAS"]);
 const billingSchema = z.enum(["MENSAL", "ANUAL"]);
@@ -65,6 +74,16 @@ const patchBodySchema = z
   })
   .refine((o) => Object.keys(o).length > 0, { message: "empty_patch" });
 
+const patchQrCodeBodySchema = z.object({
+  isActive: z.boolean(),
+});
+
+const generateQrCodesBodySchema = z
+  .object({
+    kitsSold: z.number().int().min(0).optional(),
+  })
+  .optional();
+
 function toIso(value: unknown): string {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
     return value.toISOString();
@@ -76,7 +95,19 @@ function toIso(value: unknown): string {
   return new Date().toISOString();
 }
 
-function serializeClient(row: ClientRow) {
+function serializeQrCode(row: ClientQrCodeRow) {
+  return {
+    id: row.id,
+    clientId: row.clientId,
+    qrToken: row.qrToken,
+    label: row.label,
+    isActive: row.isActive,
+    createdAt: toIso(row.createdAt),
+    updatedAt: toIso(row.updatedAt),
+  };
+}
+
+function serializeClient(row: ClientRow, qrCodes: ClientQrCodeRow[] = []) {
   return {
     id: row.id,
     cnpj: row.cnpj,
@@ -98,8 +129,110 @@ function serializeClient(row: ClientRow) {
     commercialStatus: row.commercialStatus,
     qrToken: row.qrToken,
     isActive: row.isActive,
+    qrCodes: qrCodes.map(serializeQrCode),
     createdAt: toIso(row.createdAt),
     updatedAt: toIso(row.updatedAt),
+  };
+}
+
+function groupQrCodesByClient(rows: ClientQrCodeRow[]): Map<string, ClientQrCodeRow[]> {
+  const map = new Map<string, ClientQrCodeRow[]>();
+  for (const row of rows) {
+    const list = map.get(row.clientId) ?? [];
+    list.push(row);
+    map.set(row.clientId, list);
+  }
+  return map;
+}
+
+async function loadClientWithQrCodes(id: string) {
+  const row = await findClientById(id);
+  if (!row) return null;
+  const qrCodes = await listQrCodesByClientId(id);
+  return { row, qrCodes };
+}
+
+async function generateMissingQrCodes(
+  request: FastifyRequest,
+  clientId: string,
+  kitsSold: number,
+  clientRow: ClientRow,
+) {
+  const existing = await listQrCodesByClientId(clientId);
+  const qrCodesToCreate = Math.max(0, kitsSold - existing.length);
+
+  request.log.info(
+    {
+      clientId,
+      kits_sold: kitsSold,
+      existingQrCodes: existing.length,
+      qrCodesToCreate,
+    },
+    "generate_qr_codes_requested",
+  );
+
+  if (kitsSold <= 0) {
+    return {
+      status: 400 as const,
+      error: "no_active_kits",
+      message: "A arena ainda não possui kits ativos.",
+    };
+  }
+
+  if (existing.length >= kitsSold) {
+    request.log.info(
+      { clientId, kits_sold: kitsSold, existingQrCodes: existing.length },
+      "generate_qr_codes_already_complete",
+    );
+    return {
+      status: 200 as const,
+      row: clientRow,
+      qrCodes: existing,
+      created: 0,
+      message: "QR Codes já estão completos para a quantidade de kits.",
+    };
+  }
+
+  const isActiveQr =
+    clientRow.commercialStatus === "INATIVO" ? false : clientRow.isActive;
+
+  const { qrCodes, created } = await ensureClientQrCodesForKitCount(
+    clientId,
+    kitsSold,
+    isActiveQr,
+    (token, label) => {
+      request.log.info({ clientId, label, token }, "generate_qr_codes_created_token");
+    },
+  );
+
+  let row = clientRow;
+  if (qrCodes.length > 0 && qrCodes[0]!.qrToken !== row.qrToken) {
+    const updated = await updateClientQrToken(clientId, qrCodes[0]!.qrToken);
+    if (updated) row = updated;
+  }
+
+  request.log.info(
+    {
+      clientId,
+      kits_sold: kitsSold,
+      existingQrCodes: existing.length,
+      qrCodesToCreate,
+      qrCodesCreated: created,
+      finishedTotal: qrCodes.length,
+      tokens: qrCodes.map((q) => ({ id: q.id, label: q.label, token: q.qrToken })),
+    },
+    "generate_qr_codes_finished",
+  );
+
+  return {
+    status: 201 as const,
+    row,
+    qrCodes,
+    created,
+    message:
+      created > 0
+        ? `${created} QR Code(s) gerado(s) com sucesso.`
+        : "QR Codes já estão completos para a quantidade de kits.",
   };
 }
 
@@ -131,7 +264,11 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get("/clients", async (request, reply) => {
     try {
       const rows = await listAllClients();
-      return reply.send({ clients: rows.map(serializeClient) });
+      const qrRows = await listQrCodesByClientIds(rows.map((r) => r.id));
+      const qrByClient = groupQrCodesByClient(qrRows);
+      return reply.send({
+        clients: rows.map((row) => serializeClient(row, qrByClient.get(row.id) ?? [])),
+      });
     } catch (e) {
       request.log.error({ err: e }, "list_clients_failed");
       return reply.status(500).send({
@@ -144,9 +281,9 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get("/clients/:id", async (request, reply) => {
     const id = (request.params as { id: string }).id;
     try {
-      const row = await findClientById(id);
-      if (!row) return reply.status(404).send({ error: "not_found" });
-      return reply.send({ client: serializeClient(row) });
+      const loaded = await loadClientWithQrCodes(id);
+      if (!loaded) return reply.status(404).send({ error: "not_found" });
+      return reply.send({ client: serializeClient(loaded.row, loaded.qrCodes) });
     } catch (e) {
       request.log.error({ err: e }, "get_client_failed");
       return reply.status(500).send({
@@ -184,45 +321,50 @@ export async function adminRoutes(app: FastifyInstance) {
     const isActiveQr =
       parsed.data.commercialStatus === "INATIVO" ? false : parsed.data.isActive;
 
-    let token = generateQrToken();
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        const row = await insertClient({
-          cnpj,
-          razaoSocial: parsed.data.razaoSocial,
-          nomeFantasia: parsed.data.nomeFantasia,
-          addrCep: parsed.data.addrCep.replace(/\D/g, "").slice(0, 8),
-          addrStreet: parsed.data.addrStreet,
-          addrNumber: parsed.data.addrNumber,
-          addrComplement: parsed.data.addrComplement,
-          addrNeighborhood: parsed.data.addrNeighborhood,
-          addrCity: parsed.data.addrCity,
-          addrState: parsed.data.addrState.toUpperCase().slice(0, 2),
-          phone: parsed.data.phone,
-          email: parsed.data.email,
-          plan: parsed.data.plan,
-          billingType: parsed.data.billingType,
-          planValueCents: parsed.data.planValueCents,
-          kitsSold: parsed.data.kitsSold,
-          commercialStatus: parsed.data.commercialStatus,
-          qrToken: token,
-          isActive: isActiveQr,
-        });
-        return reply.status(201).send({ client: serializeClient(row) });
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : "";
-        request.log.error({ err: e, attempt }, "insert_client_failed");
-        if (msg.includes("unique") || msg.includes("duplicate")) {
-          token = generateQrToken();
-          continue;
-        }
-        return reply.status(500).send({
-          error: "insert_client_failed",
-          message: msg || String(e),
-        });
+    const kitsSold = parsed.data.kitsSold;
+
+    request.log.info(
+      { kitsSold, nomeFantasia: parsed.data.nomeFantasia, cnpj },
+      "create_client_received",
+    );
+
+    try {
+      const primaryToken = await generateUniqueQrToken();
+
+      const row = await insertClient({
+        cnpj,
+        razaoSocial: parsed.data.razaoSocial,
+        nomeFantasia: parsed.data.nomeFantasia,
+        addrCep: parsed.data.addrCep.replace(/\D/g, "").slice(0, 8),
+        addrStreet: parsed.data.addrStreet,
+        addrNumber: parsed.data.addrNumber,
+        addrComplement: parsed.data.addrComplement,
+        addrNeighborhood: parsed.data.addrNeighborhood,
+        addrCity: parsed.data.addrCity,
+        addrState: parsed.data.addrState.toUpperCase().slice(0, 2),
+        phone: parsed.data.phone,
+        email: parsed.data.email,
+        plan: parsed.data.plan,
+        billingType: parsed.data.billingType,
+        planValueCents: parsed.data.planValueCents,
+        kitsSold,
+        commercialStatus: parsed.data.commercialStatus,
+        qrToken: primaryToken,
+        isActive: isActiveQr,
+      });
+
+      return reply.status(201).send({ client: serializeClient(row, []) });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "";
+      request.log.error({ err: e }, "insert_client_failed");
+      if (msg.includes("unique") || msg.includes("duplicate")) {
+        return reply.status(409).send({ error: "cnpj_already_registered" });
       }
+      return reply.status(500).send({
+        error: "insert_client_failed",
+        message: msg || String(e),
+      });
     }
-    return reply.status(500).send({ error: "token_collision" });
   });
 
   app.patch("/clients/:id", async (request, reply) => {
@@ -287,7 +429,9 @@ export async function adminRoutes(app: FastifyInstance) {
     try {
       const row = await updateClient(id, patch);
       if (!row) return reply.status(404).send({ error: "not_found" });
-      return reply.send({ client: serializeClient(row) });
+
+      const qrCodes = await listQrCodesByClientId(id);
+      return reply.send({ client: serializeClient(row, qrCodes) });
     } catch (e) {
       request.log.error({ err: e }, "patch_client_failed");
       return reply.status(500).send({
@@ -297,18 +441,138 @@ export async function adminRoutes(app: FastifyInstance) {
     }
   });
 
+  app.post("/clients/:id/qr-codes/generate", async (request, reply) => {
+    const id = (request.params as { id: string }).id;
+    const parsed = generateQrCodesBodySchema.safeParse(request.body ?? {});
+
+    const client = await findClientById(id);
+    if (!client) return reply.status(404).send({ error: "not_found" });
+
+    const kitsSold =
+      parsed.success && parsed.data?.kitsSold !== undefined
+        ? parsed.data.kitsSold
+        : client.kitsSold;
+
+    request.log.info(
+      { clientId: id, kits_sold: kitsSold, bodyKitsSold: parsed.success ? parsed.data?.kitsSold : undefined },
+      "generate_qr_codes_received",
+    );
+
+    try {
+      const result = await generateMissingQrCodes(request, id, kitsSold, client);
+
+      if (result.status === 400) {
+        return reply.status(400).send({
+          error: result.error,
+          message: result.message,
+        });
+      }
+
+      const httpStatus = result.created > 0 ? 201 : 200;
+      return reply.status(httpStatus).send({
+        client: serializeClient(result.row, result.qrCodes),
+        created: result.created,
+        message: result.message,
+      });
+    } catch (e) {
+      request.log.error({ err: e }, "generate_qr_codes_failed");
+      return reply.status(500).send({
+        error: "generate_qr_codes_failed",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  });
+
   app.post("/clients/:id/regenerate-token", async (request, reply) => {
     const id = (request.params as { id: string }).id;
-    const existing = await findClientById(id);
-    if (!existing) return reply.status(404).send({ error: "not_found" });
+    const loaded = await loadClientWithQrCodes(id);
+    if (!loaded) return reply.status(404).send({ error: "not_found" });
 
-    let token = generateQrToken();
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const row = await updateClientQrToken(id, token);
-      if (row) return reply.send({ client: serializeClient(row) });
-      token = generateQrToken();
+    const firstQr = loaded.qrCodes[0];
+    if (firstQr) {
+      try {
+        const token = await generateUniqueQrToken();
+        const updatedQr = await updateQrCodeToken(firstQr.id, token);
+        if (!updatedQr) return reply.status(404).send({ error: "not_found" });
+        await updateClientQrToken(id, token);
+        const qrCodes = await listQrCodesByClientId(id);
+        return reply.send({ client: serializeClient(loaded.row, qrCodes) });
+      } catch (e) {
+        request.log.error({ err: e }, "regenerate_token_failed");
+        return reply.status(500).send({ error: "token_collision" });
+      }
     }
-    return reply.status(500).send({ error: "token_collision" });
+
+    try {
+      const token = await generateUniqueQrToken();
+      const row = await updateClientQrToken(id, token);
+      if (!row) return reply.status(404).send({ error: "not_found" });
+      return reply.send({ client: serializeClient(row, []) });
+    } catch (e) {
+      request.log.error({ err: e }, "regenerate_token_failed");
+      return reply.status(500).send({ error: "token_collision" });
+    }
+  });
+
+  app.patch("/clients/:clientId/qr-codes/:qrId", async (request, reply) => {
+    const { clientId, qrId } = request.params as { clientId: string; qrId: string };
+    const parsed = patchQrCodeBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "invalid_body" });
+    }
+
+    const client = await findClientById(clientId);
+    if (!client) return reply.status(404).send({ error: "not_found" });
+
+    if (client.commercialStatus === "INATIVO" && parsed.data.isActive) {
+      return reply.status(400).send({
+        error: "cannot_activate_qr_inactive_client",
+        message: "Não é possível ativar QR de cliente com cadastro inativo.",
+      });
+    }
+
+    const qr = await findQrCodeById(qrId);
+    if (!qr || qr.clientId !== clientId) {
+      return reply.status(404).send({ error: "qr_not_found" });
+    }
+
+    const updated = await updateQrCodeActive(qrId, parsed.data.isActive);
+    if (!updated) return reply.status(404).send({ error: "qr_not_found" });
+
+    const qrCodes = await listQrCodesByClientId(clientId);
+    return reply.send({ qrCode: serializeQrCode(updated), client: serializeClient(client, qrCodes) });
+  });
+
+  app.post("/clients/:clientId/qr-codes/:qrId/regenerate-token", async (request, reply) => {
+    const { clientId, qrId } = request.params as { clientId: string; qrId: string };
+
+    const client = await findClientById(clientId);
+    if (!client) return reply.status(404).send({ error: "not_found" });
+
+    const qr = await findQrCodeById(qrId);
+    if (!qr || qr.clientId !== clientId) {
+      return reply.status(404).send({ error: "qr_not_found" });
+    }
+
+    try {
+      const token = await generateUniqueQrToken();
+      const updated = await updateQrCodeToken(qrId, token);
+      if (!updated) return reply.status(404).send({ error: "qr_not_found" });
+
+      if (client.qrToken === qr.qrToken) {
+        await updateClientQrToken(clientId, token);
+      }
+
+      const refreshedClient = await findClientById(clientId);
+      const qrCodes = await listQrCodesByClientId(clientId);
+      return reply.send({
+        qrCode: serializeQrCode(updated),
+        client: serializeClient(refreshedClient!, qrCodes),
+      });
+    } catch (e) {
+      request.log.error({ err: e }, "regenerate_qr_token_failed");
+      return reply.status(500).send({ error: "token_collision" });
+    }
   });
 
   app.delete("/clients/:id", async (request, reply) => {

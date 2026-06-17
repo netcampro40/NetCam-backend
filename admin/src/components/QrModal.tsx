@@ -1,6 +1,5 @@
 import { useRef } from "react";
 import QRCode from "react-qr-code";
-import type { Client } from "../api";
 
 function downloadSvgFromContainer(container: HTMLElement | null, filename: string) {
   if (!container) return;
@@ -22,13 +21,16 @@ async function copyText(text: string) {
 }
 
 type Props = {
-  client: Client;
+  title: string;
+  qrToken: string;
+  label?: string;
   onClose: () => void;
 };
 
-export function QrModal({ client, onClose }: Props) {
+export function QrModal({ title, qrToken, label, onClose }: Props) {
   const qrWrapRef = useRef<HTMLDivElement>(null);
-  const safeName = client.nomeFantasia.replace(/\s+/g, "-").slice(0, 40);
+  const safeName = title.replace(/\s+/g, "-").slice(0, 40);
+  const safeLabel = (label ?? "qr").replace(/\s+/g, "-").slice(0, 20);
 
   return (
     <div
@@ -56,9 +58,12 @@ export function QrModal({ client, onClose }: Props) {
         }}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 style={{ marginTop: 0 }}>{client.nomeFantasia}</h3>
+        <h3 style={{ marginTop: 0 }}>{title}</h3>
+        {label && (
+          <p style={{ fontSize: 13, color: "#52525b", marginTop: 0, marginBottom: 8 }}>{label}</p>
+        )}
         <p style={{ fontSize: 13, color: "#52525b", marginBottom: 8 }}>
-          O QR contém <strong>apenas o token atual</strong> — é o que o app NetCam lê ao escanear.
+          O QR contém <strong>apenas o token</strong> — é o que o app NetCam lê ao escanear.
         </p>
         <div
           style={{
@@ -73,7 +78,7 @@ export function QrModal({ client, onClose }: Props) {
             border: "1px solid #e4e4e7",
           }}
         >
-          Token: {client.qrToken}
+          Token: {qrToken}
         </div>
         <div
           ref={qrWrapRef}
@@ -86,20 +91,18 @@ export function QrModal({ client, onClose }: Props) {
             borderRadius: 8,
           }}
         >
-          <QRCode value={client.qrToken} size={220} />
+          <QRCode value={qrToken} size={220} />
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 16 }}>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => copyText(client.qrToken)}
-          >
+          <button type="button" className="btn btn-secondary" onClick={() => copyText(qrToken)}>
             Copiar token
           </button>
           <button
             type="button"
             className="btn btn-secondary"
-            onClick={() => downloadSvgFromContainer(qrWrapRef.current, `netcam-qr-${safeName}.svg`)}
+            onClick={() =>
+              downloadSvgFromContainer(qrWrapRef.current, `netcam-qr-${safeName}-${safeLabel}.svg`)
+            }
           >
             Baixar QR (SVG)
           </button>

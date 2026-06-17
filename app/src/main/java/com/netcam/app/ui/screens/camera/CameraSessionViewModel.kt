@@ -3,6 +3,7 @@ package com.netcam.app.ui.screens.camera
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.netcam.app.data.recording.CameraXVideoEngine
 import com.netcam.app.di.AppGraph
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -15,6 +16,7 @@ import kotlinx.coroutines.launch
 data class CameraSessionUiState(
     val isActive: Boolean = false,
     val elapsedMillis: Long = 0L,
+    val sessionError: String? = null,
 )
 
 class CameraSessionViewModel : ViewModel() {
@@ -22,6 +24,7 @@ class CameraSessionViewModel : ViewModel() {
     private companion object {
         private const val TAG = "CameraSessionVM"
     }
+
     private val sessionController = AppGraph.sessionController
     private val continuousRecordingController = AppGraph.continuousRecordingController
     private val recordingSegmentController = AppGraph.recordingSegmentController
@@ -37,28 +40,51 @@ class CameraSessionViewModel : ViewModel() {
 
     private var timerJob: Job? = null
 
-    fun startSession() {
-        if (_uiState.value.isActive) return
+    fun startSession(): Boolean {
+        _uiState.update { it.copy(sessionError = null) }
+
+        recordingSegmentController.recoverStuckFinalizationIfNeeded()
+
         if (recordingSegmentController.isContinuousRecordingFinalizationPending()) {
-            Log.w(
-                TAG,
-                "startSession ignorado: aguardando finalização do arquivo contínuo da sessão anterior",
-            )
-            return
+            val message = "Aguarde a finalização da gravação anterior e tente novamente."
+            Log.w(TAG, "[CAMERA] startSession blocked: finalization pending")
+            _uiState.update { it.copy(sessionError = message) }
+            return false
+        }
+
+        if (CameraXVideoEngine.videoCapture == null) {
+            val message = "Câmera ainda não está pronta para gravar."
+            Log.w(TAG, "[CAMERA] startSession blocked: videoCapture null")
+            _uiState.update { it.copy(sessionError = message) }
+            return false
+        }
+
+        if (continuousRecordingController.isBaseRecordingActive()) {
+            Log.w(TAG, "[CAMERA] stale base recording flag; forcing release")
+            continuousRecordingController.forceReleaseStaleRecording("start_session_recovery")
         }
 
         sessionController.startSession()
         recordingSegmentController.onSessionStarted()
         continuousRecordingController.startBaseRecording()
+
         if (!continuousRecordingController.isBaseRecordingActive()) {
-            Log.w(TAG, "startSession abortado: gravação contínua não iniciou (camera engine indisponível)")
+            Log.w(TAG, "[RECORDING] startSession failed: base recording inactive after start")
             sessionController.stopSession()
-            return
+            recordingSegmentController.onSessionStopped()
+            continuousRecordingController.forceReleaseStaleRecording("start_session_failed")
+            _uiState.update {
+                it.copy(
+                    sessionError = "Não foi possível iniciar a gravação. Tente novamente.",
+                )
+            }
+            return false
         }
 
-        _uiState.update { it.copy(isActive = true, elapsedMillis = 0L) }
-
+        _uiState.update { it.copy(isActive = true, elapsedMillis = 0L, sessionError = null) }
+        Log.d(TAG, "[RECORDING] session started")
         startTimer()
+        return true
     }
 
     fun stopSession() {
@@ -74,6 +100,11 @@ class CameraSessionViewModel : ViewModel() {
         timerJob = null
 
         _uiState.update { it.copy(isActive = false, elapsedMillis = 0L) }
+        Log.d(TAG, "[RECORDING] session stopped")
+    }
+
+    fun clearSessionError() {
+        _uiState.update { it.copy(sessionError = null) }
     }
 
     private fun startTimer() {
@@ -92,10 +123,9 @@ class CameraSessionViewModel : ViewModel() {
 
     override fun onCleared() {
         if (_uiState.value.isActive) {
-            Log.w(TAG, "onCleared com sessão ativa — encerrando gravação (fallback ao destruir ViewModel)")
+            Log.w(TAG, "[CAMERA] onCleared with active session — stopping recording")
             stopSession()
         }
         super.onCleared()
     }
 }
-

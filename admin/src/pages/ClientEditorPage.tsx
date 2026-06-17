@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   createClient,
   deleteClient,
+  generateClientQrCodes,
   getClient,
   lookupCnpj,
   patchClient,
-  regenerateClientToken,
+  patchClientQrCode,
+  regenerateClientQrCodeToken,
   type Client,
   type ClientPlan,
   type BillingType,
   type CommercialStatus,
+  type ClientQrCode,
 } from "../api";
 import { QrModal } from "../components/QrModal";
 import { formatCepDisplay, formatCnpjDisplay, onlyDigits } from "../utils/cnpj";
@@ -79,6 +82,15 @@ function clientToForm(c: Client): FormState {
   };
 }
 
+function resolveKitsCount(formValue: string, savedKits: number): number {
+  const trimmed = formValue.trim();
+  if (trimmed === "") return savedKits;
+  const parsed = parseInt(trimmed, 10);
+  return Number.isNaN(parsed) ? savedKits : parsed;
+}
+
+type QrFeedback = { type: "error" | "success"; text: string } | null;
+
 function parsePlanReais(s: string): number {
   const n = parseFloat(s.replace(",", "."));
   if (Number.isNaN(n) || n < 0) return 0;
@@ -88,6 +100,7 @@ function parsePlanReais(s: string): number {
 export function ClientEditorPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const isNew = id === "new";
 
   const [form, setForm] = useState<FormState>(emptyForm);
@@ -95,11 +108,16 @@ export function ClientEditorPage() {
   const [loading, setLoading] = useState(!isNew);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(
+    (location.state as { flash?: string } | null)?.flash ?? null,
+  );
   const [lookupStatus, setLookupStatus] = useState<"idle" | "loading" | "ok" | "fail">("idle");
-  const [qrModal, setQrModal] = useState(false);
+  const [qrModal, setQrModal] = useState<ClientQrCode | null>(null);
   const [deleteModal, setDeleteModal] = useState<"closed" | "step1" | "step2">("closed");
   const [deletePhrase, setDeletePhrase] = useState("");
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [generatingQr, setGeneratingQr] = useState(false);
+  const [qrFeedback, setQrFeedback] = useState<QrFeedback>(null);
 
   const lookupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastFetchedCnpj = useRef<string>("");
@@ -171,6 +189,7 @@ export function ClientEditorPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    setSuccess(null);
     const kits = parseInt(form.kitsSold, 10);
     if (Number.isNaN(kits) || kits < 0) {
       setError("Quantidade de kits inválida");
@@ -213,7 +232,12 @@ export function ClientEditorPage() {
           commercialStatus: form.commercialStatus,
           isActive: form.commercialStatus === "ATIVO",
         });
-        navigate(`/clients/${created.id}`, { replace: true });
+        navigate(`/clients/${created.id}`, {
+          replace: true,
+          state: {
+            flash: `Cliente "${created.nomeFantasia}" cadastrado. Use "Gerar QR Codes" para criar os tokens de acesso.`,
+          },
+        });
         return;
       }
       if (!id) return;
@@ -232,6 +256,7 @@ export function ClientEditorPage() {
       });
       setClient(updated);
       setForm(clientToForm(updated));
+      setSuccess("Cliente salvo.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao salvar");
     } finally {
@@ -239,10 +264,9 @@ export function ClientEditorPage() {
     }
   }
 
-  async function toggleQrAccess() {
+  async function toggleQrAccess(qr: ClientQrCode) {
     if (!client) return;
-    const turningOn = !client.isActive;
-    if (turningOn && form.commercialStatus === "INATIVO") {
+    if (!qr.isActive && form.commercialStatus === "INATIVO") {
       setError(
         "Não é possível ativar o QR enquanto o cadastro estiver inativo. Marque o cadastro como Ativo e salve antes.",
       );
@@ -250,24 +274,89 @@ export function ClientEditorPage() {
     }
     setError(null);
     try {
-      const updated = await patchClient(client.id, { isActive: !client.isActive });
+      const { client: updated } = await patchClientQrCode(client.id, qr.id, {
+        isActive: !qr.isActive,
+      });
       setClient(updated);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao atualizar");
     }
   }
 
-  async function regenToken() {
+  async function regenToken(qr: ClientQrCode) {
     if (!client) return;
     const msg =
-      `Regenerar o token?\n\nO QR atual deixa de funcionar no app.\n\nContinuar?`;
+      `Regenerar o token de "${qr.label}"?\n\nO QR atual deixa de funcionar no app.\n\nContinuar?`;
     if (!confirm(msg)) return;
     setError(null);
     try {
-      const updated = await regenerateClientToken(client.id);
+      const { client: updated } = await regenerateClientQrCodeToken(client.id, qr.id);
       setClient(updated);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao regenerar");
+    }
+  }
+
+  async function copyQrToken(token: string) {
+    await navigator.clipboard.writeText(token);
+  }
+
+  async function handleGenerateQrCodes() {
+    console.log("[admin] botão Gerar QR Codes clicado");
+
+    if (!client) {
+      console.warn("[admin] generate_qr: client is null");
+      setQrFeedback({ type: "error", text: "Cliente não carregado. Recarregue a página." });
+      return;
+    }
+
+    const kits = resolveKitsCount(form.kitsSold, client.kitsSold);
+    console.log("[admin] generate_qr", {
+      clientId: client.id,
+      formKitsSold: form.kitsSold,
+      savedKitsSold: client.kitsSold,
+      kitsUsed: kits,
+    });
+
+    if (kits <= 0) {
+      setError(null);
+      setSuccess(null);
+      setQrFeedback({ type: "error", text: "A arena ainda não possui kits ativos." });
+      return;
+    }
+
+    setGeneratingQr(true);
+    setError(null);
+    setSuccess(null);
+    setQrFeedback(null);
+
+    try {
+      let workingClient = client;
+      if (kits !== client.kitsSold) {
+        console.log("[admin] generate_qr: salvando kitsSold antes de gerar", { kits });
+        workingClient = await patchClient(client.id, { kitsSold: kits });
+        setClient(workingClient);
+        setForm(clientToForm(workingClient));
+      }
+
+      const result = await generateClientQrCodes(workingClient.id, kits);
+      console.log("[admin] generate_qr: sucesso", {
+        clientId: workingClient.id,
+        created: result.created,
+        qrCodes: result.client.qrCodes?.length ?? 0,
+        message: result.message,
+      });
+
+      setClient(result.client);
+      setQrFeedback({ type: "success", text: result.message });
+      setSuccess(result.message);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Erro ao gerar QR Codes";
+      console.error("[admin] generate_qr: falha", message);
+      setQrFeedback({ type: "error", text: message });
+      setError(message);
+    } finally {
+      setGeneratingQr(false);
     }
   }
 
@@ -318,6 +407,7 @@ export function ClientEditorPage() {
       </div>
       <h1>{title}</h1>
       {error && <div className="admin-error">{error}</div>}
+      {success && <div className="admin-success">{success}</div>}
 
       <form onSubmit={handleSubmit} className="admin-form">
         <section className="admin-card form-section">
@@ -495,6 +585,10 @@ export function ClientEditorPage() {
               value={form.kitsSold}
               onChange={(e) => setForm((f) => ({ ...f, kitsSold: e.target.value }))}
             />
+            <small className="field-hint">
+              Informe quantos kits a arena possui. Os QR Codes são gerados manualmente na seção
+              abaixo.
+            </small>
           </label>
           <label className="field">
             <span>Status (cadastro)</span>
@@ -517,36 +611,82 @@ export function ClientEditorPage() {
           <section className="admin-card form-section">
             <h2>Acesso QR / app</h2>
             <p className="field-hint">
-              O app Android valida este token ao ler o QR. Desativar bloqueia o acesso no servidor.
+              Cada kit possui um QR Code individual. Use o botão abaixo para gerar os tokens com
+              base na quantidade de kits informada no formulário.
             </p>
-            {form.commercialStatus === "INATIVO" && (
-              <p className="field-hint field-hint-warn">
-                <strong>Cadastro inativo:</strong> o QR não pode ficar ativo. Ao salvar com cadastro inativo, o acesso
-                por QR é desligado automaticamente no servidor.
-              </p>
-            )}
-            <div className="token-box">{client.qrToken}</div>
             <div className="btn-row">
-              <button type="button" className="btn btn-secondary" onClick={() => setQrModal(true)}>
-                Ver QR code
-              </button>
               <button
                 type="button"
-                className="btn btn-secondary"
-                onClick={toggleQrAccess}
-                disabled={form.commercialStatus === "INATIVO" && !client.isActive}
-                title={
-                  form.commercialStatus === "INATIVO" && !client.isActive
-                    ? "Cadastro inativo: não é possível ativar o QR"
-                    : undefined
-                }
+                className="btn btn-primary"
+                onClick={() => void handleGenerateQrCodes()}
+                disabled={generatingQr || saving}
               >
-                {client.isActive ? "Desativar acesso (QR)" : "Ativar acesso (QR)"}
-              </button>
-              <button type="button" className="btn btn-danger" onClick={regenToken}>
-                Regenerar token
+                {generatingQr ? "Gerando…" : "Gerar QR Codes"}
               </button>
             </div>
+            {qrFeedback && (
+              <div className={qrFeedback.type === "error" ? "admin-error qr-feedback" : "admin-success qr-feedback"}>
+                {qrFeedback.text}
+              </div>
+            )}
+            {form.commercialStatus === "INATIVO" && (
+              <p className="field-hint field-hint-warn">
+                <strong>Cadastro inativo:</strong> nenhum QR pode ficar ativo enquanto o cadastro
+                estiver inativo.
+              </p>
+            )}
+            {(client.qrCodes ?? []).length === 0 ? (
+              <p className="field-hint">Nenhum QR Code cadastrado para este cliente.</p>
+            ) : (
+              <div className="qr-editor-list">
+                {(client.qrCodes ?? []).map((qr) => (
+                  <div key={qr.id} className="qr-editor-item">
+                    <div className="qr-editor-item-head">
+                      <strong>{qr.label}</strong>
+                      {form.commercialStatus === "INATIVO" ? (
+                        <span className="tag tag-muted">Bloqueado</span>
+                      ) : qr.isActive ? (
+                        <span className="tag tag-ok">Ativo</span>
+                      ) : (
+                        <span className="tag tag-warn">Inativo</span>
+                      )}
+                    </div>
+                    <div className="token-box">{qr.qrToken}</div>
+                    <div className="btn-row">
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-tiny"
+                        onClick={() => copyQrToken(qr.qrToken)}
+                      >
+                        Copiar token
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-tiny"
+                        onClick={() => setQrModal(qr)}
+                      >
+                        Ver QR code
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-tiny"
+                        onClick={() => toggleQrAccess(qr)}
+                        disabled={form.commercialStatus === "INATIVO" && !qr.isActive}
+                      >
+                        {qr.isActive ? "Desativar" : "Ativar"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-danger btn-tiny"
+                        onClick={() => regenToken(qr)}
+                      >
+                        Regenerar token
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
         )}
 
@@ -570,7 +710,14 @@ export function ClientEditorPage() {
         </div>
       </form>
 
-      {client && qrModal && <QrModal client={client} onClose={() => setQrModal(false)} />}
+      {client && qrModal && (
+        <QrModal
+          title={client.nomeFantasia}
+          qrToken={qrModal.qrToken}
+          label={qrModal.label}
+          onClose={() => setQrModal(null)}
+        />
+      )}
 
       {client && deleteModal !== "closed" && (
         <div

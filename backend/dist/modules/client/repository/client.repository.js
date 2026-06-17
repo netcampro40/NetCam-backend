@@ -1,17 +1,28 @@
 import { eq } from "drizzle-orm";
 import { db } from "../../../shared/db/client.js";
 import { clients } from "../../../shared/db/schema/clients.js";
+import { findClientByQrCodeToken } from "./clientQrCode.repository.js";
+/** Busca cliente pelo token — primeiro na tabela de QRs individuais, depois legado em clients.qr_token. */
 export async function findClientByQrToken(qrToken) {
-    const result = await db
+    const fromQrTable = await findClientByQrCodeToken(qrToken);
+    if (fromQrTable)
+        return fromQrTable;
+    const [legacy] = await db
         .select({
         id: clients.id,
         nomeFantasia: clients.nomeFantasia,
-        isActive: clients.isActive,
-        qrToken: clients.qrToken,
         commercialStatus: clients.commercialStatus,
+        isActive: clients.isActive,
     })
         .from(clients)
         .where(eq(clients.qrToken, qrToken))
         .limit(1);
-    return result[0] ?? null;
+    if (!legacy)
+        return null;
+    return {
+        id: legacy.id,
+        nomeFantasia: legacy.nomeFantasia,
+        commercialStatus: legacy.commercialStatus,
+        isQrActive: legacy.isActive,
+    };
 }

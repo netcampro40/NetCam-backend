@@ -19,13 +19,15 @@ async function main() {
     const addressSql = readFileSync(resolve(process.cwd(), "sql/004_address_split_from_legacy.sql"), "utf-8");
     const backfillClientsSchemaSql = readFileSync(resolve(process.cwd(), "sql/005_backfill_clients_schema.sql"), "utf-8");
     const seedSql = readFileSync(resolve(process.cwd(), "sql/002_seed_clients.sql"), "utf-8");
+    const clientQrCodesSql = readFileSync(resolve(process.cwd(), "sql/006_client_qr_codes.sql"), "utf-8");
     try {
         await pool.query(migrateArenasSql);
         await pool.query(initSql);
         await pool.query(addressSql);
         await pool.query(backfillClientsSchemaSql);
+        await pool.query(clientQrCodesSql);
         await pool.query(seedSql);
-        console.log("Database: migrate arenas → init clients → address fields → schema backfill → seed — OK.");
+        console.log("Database: migrate arenas → init clients → address fields → schema backfill → client QR codes → seed — OK.");
     }
     finally {
         await pool.end();

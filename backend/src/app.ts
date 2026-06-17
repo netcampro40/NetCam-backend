@@ -2,8 +2,11 @@ import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { adminRoutes } from "./modules/admin/http/admin.routes.js";
 import { authRoutes } from "./modules/auth/http/auth.routes.js";
+import { ensureDatabaseSchema } from "./shared/db/ensureSchema.js";
 
 export async function buildApp() {
+  await ensureDatabaseSchema();
+
   const app = Fastify({
     logger: true,
   });

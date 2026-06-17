@@ -17,5 +17,7 @@ interface ContinuousRecordingController {
     fun stopBaseRecording(onFinalized: (() -> Unit)? = null)
 
     fun isBaseRecordingActive(): Boolean
-}
 
+    /** Libera gravação/controle presos sem invocar callback de finalização. */
+    fun forceReleaseStaleRecording(reason: String)
+}

@@ -38,6 +38,9 @@ interface RecordingSegmentController {
      */
     fun isContinuousRecordingFinalizationPending(): Boolean
 
+    /** Libera finalização presa além do tempo esperado (watchdog). */
+    fun recoverStuckFinalizationIfNeeded(): Boolean = false
+
     /**
      * Chamado quando a gravação contínua foi realmente finalizada
      * e o arquivo está pronto. Processa apenas clipes PENDING da mesma sessão que acabou de finalizar.

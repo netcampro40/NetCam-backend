@@ -25,7 +25,7 @@ export async function validateQrToken(qrToken: string): Promise<ValidateQrResult
     return { authorized: false, reason: "inactive" };
   }
 
-  if (!client.isActive) {
+  if (!client.isQrActive) {
     return { authorized: false, reason: "inactive" };
   }
 

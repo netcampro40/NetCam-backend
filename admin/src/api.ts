@@ -2,6 +2,16 @@ export type ClientPlan = "ATE_5_QUADRAS" | "ATE_10_QUADRAS" | "ACIMA_10_QUADRAS"
 export type BillingType = "MENSAL" | "ANUAL";
 export type CommercialStatus = "ATIVO" | "INATIVO";
 
+export type ClientQrCode = {
+  id: string;
+  clientId: string;
+  qrToken: string;
+  label: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type Client = {
   id: string;
   cnpj: string;
@@ -23,6 +33,7 @@ export type Client = {
   commercialStatus: CommercialStatus;
   qrToken: string;
   isActive: boolean;
+  qrCodes: ClientQrCode[];
   createdAt: string;
   updatedAt: string;
 };
@@ -151,6 +162,72 @@ export async function regenerateClientToken(id: string): Promise<Client> {
   if (!res.ok) throw new Error(await parseError(res));
   const data = (await res.json()) as { client: Client };
   return data.client;
+}
+
+export async function patchClientQrCode(
+  clientId: string,
+  qrId: string,
+  body: { isActive: boolean },
+): Promise<{ qrCode: ClientQrCode; client: Client }> {
+  const res = await fetch(`${apiBase}/api/admin/clients/${clientId}/qr-codes/${qrId}`, {
+    method: "PATCH",
+    headers: buildHeaders(),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseError(res));
+  return (await res.json()) as { qrCode: ClientQrCode; client: Client };
+}
+
+export async function regenerateClientQrCodeToken(
+  clientId: string,
+  qrId: string,
+): Promise<{ qrCode: ClientQrCode; client: Client }> {
+  const res = await fetch(
+    `${apiBase}/api/admin/clients/${clientId}/qr-codes/${qrId}/regenerate-token`,
+    {
+      method: "POST",
+      headers: buildHeaders(false),
+    },
+  );
+  if (!res.ok) throw new Error(await parseError(res));
+  return (await res.json()) as { qrCode: ClientQrCode; client: Client };
+}
+
+export type GenerateQrCodesResult = {
+  client: Client;
+  created: number;
+  message: string;
+};
+
+export async function generateClientQrCodes(
+  clientId: string,
+  kitsSold?: number,
+): Promise<GenerateQrCodesResult> {
+  const body = kitsSold !== undefined ? { kitsSold } : {};
+  const url = `${apiBase}/api/admin/clients/${clientId}/qr-codes/generate`;
+  console.log("[admin] generateClientQrCodes request", { clientId, kitsSold, url });
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: buildHeaders(),
+    body: JSON.stringify(body),
+  });
+
+  const raw = await res.text();
+  console.log("[admin] generateClientQrCodes response", { status: res.status, body: raw });
+
+  if (!res.ok) {
+    try {
+      const j = JSON.parse(raw) as { error?: string; message?: string };
+      if (j.message) throw new Error(j.message);
+      throw new Error(j.error ?? res.statusText);
+    } catch (e) {
+      if (e instanceof Error && e.message !== "Unexpected token") throw e;
+      throw new Error(raw || res.statusText);
+    }
+  }
+
+  return JSON.parse(raw) as GenerateQrCodesResult;
 }
 
 export async function deleteClient(id: string): Promise<void> {

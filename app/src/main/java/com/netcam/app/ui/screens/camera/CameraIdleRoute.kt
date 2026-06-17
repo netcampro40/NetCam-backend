@@ -57,6 +57,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -123,6 +124,7 @@ fun CameraIdleRoute(
 
     val sessionViewModel: CameraSessionViewModel = viewModel()
     val sessionUiState by sessionViewModel.uiState.collectAsState()
+    val continuousRecordingController = AppGraph.continuousRecordingController
     val bleDebugController = AppGraph.bleDebugController
     val clipController = AppGraph.clipController
     val volumeGestureInterpreter = AppGraph.volumeButtonGestureInterpreter
@@ -142,12 +144,10 @@ fun CameraIdleRoute(
 
     DisposableEffect(sessionViewModel) {
         onDispose {
-            // Voltar do app, voltar do sistema ou outra rota: encerra sessão e evita estado “fantasma”.
             sessionViewModel.stopSession()
-            // Evita unbind imediato durante o stop da gravação para não perder o callback Finalize do CameraX.
-            // O próximo bind na reentrada já executa provider.unbindAll() antes de configurar os use cases.
+            continuousRecordingController.forceReleaseStaleRecording("camera_route_dispose")
             CameraXVideoEngine.videoCapture = null
-            Log.d("NetCam", "CameraIdleRoute onDispose: sessão encerrada e use cases liberados")
+            Log.d("NetCam", "[CAMERA] route disposed: session stopped and engine cleared")
         }
     }
 
@@ -403,7 +403,7 @@ fun CameraIdleRoute(
             }
             cameraInitState = CameraInitState.READY
             cameraInitMessage = "Câmera pronta"
-            Log.d("NetCam", "Camera bind concluído com sucesso; câmera pronta para gravação")
+            Log.d("NetCam", "[CAMERA] bind complete; ready for recording")
         } catch (t: Throwable) {
             cameraInitState = CameraInitState.ERROR
             cameraInitMessage = "Erro ao iniciar câmera: ${t.message ?: "erro desconhecido"}"
@@ -710,16 +710,30 @@ fun CameraIdleRoute(
                         if (cameraInitState != CameraInitState.READY || videoCapture == null) {
                             Log.w(
                                 "NetCam",
-                                "Clique de gravação ignorado: câmera ainda não pronta (state=$cameraInitState, videoCaptureNull=${videoCapture == null})",
+                                "[CAMERA] record ignored: state=$cameraInitState videoCaptureNull=${videoCapture == null}",
                             )
+                            sessionViewModel.clearSessionError()
                             return@RecordButton
                         }
-                        sessionViewModel.startSession()
+                        val started = sessionViewModel.startSession()
+                        if (!started) {
+                            Log.w("NetCam", "[RECORDING] startSession returned false")
+                        }
                     }
                 },
                 isActive = sessionUiState.isActive,
                 enabled = sessionUiState.isActive || (cameraInitState == CameraInitState.READY && videoCapture != null),
             )
+
+            sessionUiState.sessionError?.let { errorMessage ->
+                Text(
+                    text = errorMessage,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 8.dp),
+                    textAlign = TextAlign.Center,
+                )
+            }
         }
     }
 

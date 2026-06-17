@@ -1,5 +1,5 @@
 /*
- * NetCam BLE Controller MVP+ (ESP32-C3 + 1 botão + LED + leitura de bateria)
+ * NetCam BLE Controller MVP+ (ESP32 + 1 botão + LED + bateria opcional)
  *
  * Gestos:
  * - 1 clique              -> CLIP_1M
@@ -7,8 +7,8 @@
  * - segurar 3s            -> CLIP_SESSION
  *
  * Hardware:
- * - Botão: GPIO 7 <-> GND (INPUT_PULLUP)
- * - LED: GPIO 21 -> resistor em série -> anodo LED, catodo -> GND
+ * - Botão: GPIO 18 <-> GND (INPUT_PULLUP)
+ * - LED: GPIO 2 -> resistor em série -> anodo LED, catodo -> GND
  *
  * Bateria:
  * - Divisor R1=R2=100k (LiPo+ -> nó ADC -> GPIO 0; nó -> GND via R2)
@@ -23,17 +23,28 @@
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
+#include <esp_gap_ble_api.h>
+#if __has_include(<esp_bt_main.h>)
+#include <esp_bt_main.h>
+#define NETCAM_HAS_BT_MAIN 1
+#else
+#define NETCAM_HAS_BT_MAIN 0
+#endif
 
 // -----------------------------
 // Configuração de hardware
 // -----------------------------
-static const uint8_t BUTTON_PIN = 7;
+static const uint8_t BUTTON_PIN = 18;
 static const bool BUTTON_PRESSED_LEVEL = LOW;
-static const uint8_t LED_PIN = 21;
+static const uint8_t LED_PIN = 2;
 
 // -----------------------------
-// Bateria: ADC no GPIO 0 — divisor R1=R2=100k => Vbatt = Vpin * 2
+// Bateria (opcional):
+// - ADC no GPIO 0 — divisor R1=R2=100k => Vbatt = Vpin * 2
+// - Em DevKit com 18650, pode ficar desativado para teste de alcance BLE.
+// - GPIO0 só deve ser usado para VBAT se houver divisor externo/trilha dedicada com segurança.
 // -----------------------------
+static const bool ENABLE_BATTERY_MONITOR = false;
 static const uint8_t BATTERY_ADC_PIN = 0;
 /** Resolução do ADC (12 bits no core Arduino ESP32). */
 static const uint8_t BATTERY_ADC_RESOLUTION_BITS = 12;
@@ -70,6 +81,10 @@ static const uint32_t LONG_PRESS_MS = 3000;
 static const char *DEVICE_NAME = "NetCamPro_CTRL";
 static const char *SERVICE_UUID = "6f0a0001-8f9b-4c6a-9d55-1f2b3c4d5e01";
 static const char *CHAR_UUID = "6f0a0002-8f9b-4c6a-9d55-1f2b3c4d5e01";
+/** Modo de teste para alcance BLE: desativa sleep do BT se API disponível. */
+static const bool BLE_RANGE_TEST_MODE = true;
+/** Janela de proteção para não intercalar notify de bateria logo após comando de clipe. */
+static const uint32_t BATTERY_NOTIFY_GUARD_AFTER_COMMAND_MS = 400UL;
 
 // -----------------------------
 // Feedback LED
@@ -82,6 +97,8 @@ static const uint16_t LED_LONG_OFF_MS = 120;
 static BLEServer *g_server = nullptr;
 static BLECharacteristic *g_characteristic = nullptr;
 static bool g_deviceConnected = false;
+static uint32_t g_commandSequence = 0;
+static uint32_t g_lastCommandNotifyMs = 0;
 
 // Estado debounce botão
 static bool g_lastRawLevel = HIGH;
@@ -168,8 +185,13 @@ void setup() {
   g_debouncedLevel = g_lastRawLevel;
   g_lastRawChangeMs = millis();
 
-  setupBatteryAdc();
-  g_lastBatteryReadMs = millis();
+  if (ENABLE_BATTERY_MONITOR) {
+    setupBatteryAdc();
+    g_lastBatteryReadMs = millis();
+    Serial.println("[BAT] Monitor de bateria ativo");
+  } else {
+    Serial.println("[BAT] Monitor de bateria desativado para teste BLE");
+  }
 
   setupLed();
   setupBLE();
@@ -179,19 +201,38 @@ void setup() {
 
   Serial.println("[SYS] Firmware pronto.");
   Serial.println("[SYS] Gestos: 1 clique=CLIP_1M | 2 cliques=CLIP_2M | segurar 3s=CLIP_SESSION");
-  Serial.println("[SYS] Bateria: GPIO0 + divisor 1:2, média 10 amostras / 5s, não bloqueante.");
+  if (ENABLE_BATTERY_MONITOR) {
+    Serial.println("[SYS] Bateria: GPIO0 + divisor 1:2, média 10 amostras / 5s, não bloqueante.");
+  } else {
+    Serial.println("[SYS] Bateria: monitor desativado.");
+  }
 }
 
 void loop() {
   const uint32_t nowMs = millis();
   updateButtonAndGestures();
   updateLed();
-  updateBatteryPeriodic(nowMs);
+  if (ENABLE_BATTERY_MONITOR) {
+    updateBatteryPeriodic(nowMs);
+  }
   yield();  // alta responsividade sem delay fixo bloqueante
 }
 
 void setupBLE() {
   BLEDevice::init(DEVICE_NAME);
+  BLEDevice::setPower(ESP_PWR_LVL_P9);
+  Serial.println("[BLE] Potência TX configurada: ESP_PWR_LVL_P9");
+
+#if NETCAM_HAS_BT_MAIN
+  if (BLE_RANGE_TEST_MODE) {
+    const esp_err_t sleepResult = esp_bt_sleep_disable();
+    if (sleepResult == ESP_OK) {
+      Serial.println("[BLE] Range test: sleep BT desativado (maior consumo, melhor estabilidade de link)");
+    } else {
+      Serial.printf("[BLE] Range test: não foi possível desativar sleep BT (err=%d)\n", (int)sleepResult);
+    }
+  }
+#endif
 
   g_server = BLEDevice::createServer();
   g_server->setCallbacks(new ServerCallbacks());
@@ -208,6 +249,9 @@ void setupBLE() {
   BLEAdvertising *advertising = BLEDevice::getAdvertising();
   advertising->addServiceUUID(SERVICE_UUID);
   advertising->setScanResponse(true);
+  // Intervalos conservadores para facilitar descoberta/reconexão sem quebrar compatibilidade.
+  advertising->setMinInterval(0x20);  // 20 ms
+  advertising->setMaxInterval(0x40);  // 40 ms
   advertising->setMinPreferred(0x06);
   advertising->setMinPreferred(0x12);
   BLEDevice::startAdvertising();
@@ -297,16 +341,23 @@ void sendCommand(const char *command) {
 
   g_characteristic->setValue(command);
 
+  g_commandSequence++;
   if (g_deviceConnected) {
     g_characteristic->notify();
-    Serial.print("[CMD] ");
+    g_lastCommandNotifyMs = millis();
+    Serial.print("[CMD #");
+    Serial.print(g_commandSequence);
+    Serial.print("] ");
     Serial.print(command);
-    Serial.println(" (notify enviado)");
+    Serial.println(" notify enviado");
   } else {
-    Serial.print("[CMD] ");
+    Serial.print("[CMD #");
+    Serial.print(g_commandSequence);
+    Serial.print("] ");
     Serial.print(command);
-    Serial.println(" (sem cliente BLE conectado; valor disponível para READ)");
+    Serial.println(" sem cliente BLE conectado; valor disponível para READ");
   }
+  // Futuro: para aumentar robustez de entrega, usar eventId + deduplicação no app antes de retries.
 }
 
 void setupLed() {
@@ -450,6 +501,11 @@ void printBatteryReadout(const BatteryReadout &r) {
 /** Notificação BLE no formato esperado pelo app NetCamPro (Android). */
 void notifyBatteryPercentBle(uint8_t percent) {
   if (g_characteristic == nullptr || !g_deviceConnected) {
+    return;
+  }
+  const uint32_t nowMs = millis();
+  if ((uint32_t)(nowMs - g_lastCommandNotifyMs) < BATTERY_NOTIFY_GUARD_AFTER_COMMAND_MS) {
+    Serial.println("[BAT] notify adiado para evitar colisão com comando recente");
     return;
   }
   char buf[20];

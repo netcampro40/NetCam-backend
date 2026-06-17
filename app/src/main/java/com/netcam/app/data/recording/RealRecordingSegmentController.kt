@@ -54,6 +54,7 @@ class RealRecordingSegmentController(
     @Volatile
     private var sessionIdAwaitingFinalize: Long? = null
     private val finalizationPending = AtomicBoolean(false)
+    private var finalizationStartedAtMs: Long = 0L
     private var sessionActive = false
 
     private val scope =
@@ -207,6 +208,19 @@ class RealRecordingSegmentController(
 
     override fun isContinuousRecordingFinalizationPending(): Boolean = finalizationPending.get()
 
+    override fun recoverStuckFinalizationIfNeeded(): Boolean {
+        if (!finalizationPending.get()) return false
+        val elapsed = System.currentTimeMillis() - finalizationStartedAtMs
+        if (elapsed < STUCK_FINALIZATION_MS) return false
+        Log.w(
+            TAG,
+            "[CAMERA] recoverStuckFinalization elapsedMs=$elapsed sessionIdAwaitingFinalize=$sessionIdAwaitingFinalize",
+        )
+        finalizationPending.set(false)
+        sessionIdAwaitingFinalize = null
+        return true
+    }
+
     override fun onSessionStarted() {
         if (finalizationPending.get()) {
             Log.w(
@@ -274,6 +288,7 @@ class RealRecordingSegmentController(
         sessionActive = false
         sessionIdAwaitingFinalize = recordingSessionIdForActiveSession
         finalizationPending.set(true)
+        finalizationStartedAtMs = System.currentTimeMillis()
         Log.d(
             TAG,
             "onSessionStopped: sessão inativa; sessionIdAwaitingFinalize=$sessionIdAwaitingFinalize — clipes PENDING desta sessão serão processados após finalização da gravação",
@@ -594,6 +609,7 @@ class RealRecordingSegmentController(
     companion object {
         private const val TAG = "RealRecordingSegmentCtl"
         private const val FINALIZE_TO_PROCESS_DELAY_MS = 300L
+        private const val STUCK_FINALIZATION_MS = 30_000L
     }
 }
 

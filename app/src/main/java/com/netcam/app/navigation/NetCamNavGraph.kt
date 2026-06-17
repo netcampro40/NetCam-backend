@@ -29,15 +29,10 @@ fun NetCamNavGraph(
 ) {
     val scope = rememberCoroutineScope()
     val bleStatusState = AppGraph.bleDebugController.uiState.collectAsState()
-    val controlStatusLabel =
+    val controlStatusText =
         when (bleStatusState.value.status) {
             com.netcam.app.data.ble.BleDebugStatus.CONNECTED -> "Controle conectado"
-            com.netcam.app.data.ble.BleDebugStatus.CONNECTING -> "Conectando controle..."
-            com.netcam.app.data.ble.BleDebugStatus.SCANNING -> "Parear controle"
-            com.netcam.app.data.ble.BleDebugStatus.FOUND -> "Controle pareado"
-            com.netcam.app.data.ble.BleDebugStatus.DISCONNECTED -> "Parear controle"
-            com.netcam.app.data.ble.BleDebugStatus.ERROR -> "Parear controle"
-            else -> "Parear controle"
+            else -> "Controle não pareado"
         }
     val accessValidationViewModel =
         remember {
@@ -66,10 +61,11 @@ fun NetCamNavGraph(
                     }
                 },
                 onGalleryClick = { navController.navigate(NetCamRoute.Gallery.route) },
-                onDiagnosticsClick = { navController.navigate(NetCamRoute.CameraDiagnostics.route) },
-                onBleDebugClick = { navController.navigate(NetCamRoute.BleDebug.route) },
-                controlStatusLabel = controlStatusLabel,
-                onVolumePlusControlClick = { navController.navigate(NetCamRoute.VolumePlusControl.route) },
+                onPairControlClick = { navController.navigate(NetCamRoute.BleDebug.route) },
+                controlStatusText = controlStatusText,
+                onDebugCameraBypass = {
+                    navController.navigate(NetCamRoute.Camera.route)
+                },
             )
         }
         composable(NetCamRoute.AccessValidation.route) {

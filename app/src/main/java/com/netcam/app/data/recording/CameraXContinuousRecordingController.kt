@@ -45,7 +45,7 @@ class CameraXContinuousRecordingController(
         stopFallbackJob = null
 
         val videoCapture: VideoCapture<Recorder> = CameraXVideoEngine.videoCapture ?: run {
-            Log.w(TAG, "startBaseRecording chamado sem VideoCapture configurado. Ignorando.")
+            Log.w(TAG, "[RECORDING] startBaseRecording skipped: VideoCapture not bound")
             return
         }
 
@@ -78,7 +78,7 @@ class CameraXContinuousRecordingController(
 
             currentRecording =
                 pendingRecording.start(executor) { event ->
-                    Log.d(TAG, "Evento de gravação contínua: $event")
+                    Log.d(TAG, "[RECORDING] event=$event")
                     if (event is VideoRecordEvent.Finalize) {
                         val file = CameraXVideoEngine.currentOutputFile
                         Log.d(
@@ -91,14 +91,11 @@ class CameraXContinuousRecordingController(
 
             CameraXVideoEngine.currentOutputFile = outputFile
 
-            Log.d(
-                TAG,
-                "Gravação contínua iniciada em ${outputFile.absolutePath}",
-            )
+            Log.d(TAG, "[RECORDING] started path=${outputFile.absolutePath}")
 
             active = true
         } catch (t: Throwable) {
-            Log.e(TAG, "Erro ao iniciar gravação base contínua", t)
+            Log.e(TAG, "[RECORDING] start failed", t)
             active = false
             currentRecording?.close()
             currentRecording = null
@@ -112,14 +109,14 @@ class CameraXContinuousRecordingController(
         stopFallbackJob?.cancel()
         try {
             currentRecording?.stop()
-            Log.d(TAG, "stop() chamado; aguardando evento Finalize do CameraX para invocar callback")
+            Log.d(TAG, "[RECORDING] stop requested; awaiting Finalize")
             stopFallbackJob =
                 scope.launch {
                     delay(STOP_FALLBACK_TIMEOUT_MS)
                     if (active || currentRecording != null || onFinalizedCallback != null) {
                         Log.w(
                             TAG,
-                            "Timeout aguardando Finalize do CameraX; forçando liberação da sessão de gravação",
+                            "[RECORDING] Finalize timeout; forcing release",
                         )
                         finalizeStopIfNeeded("fallback_timeout")
                     }
@@ -131,6 +128,12 @@ class CameraXContinuousRecordingController(
     }
 
     override fun isBaseRecordingActive(): Boolean = active
+
+    override fun forceReleaseStaleRecording(reason: String) {
+        if (!active && currentRecording == null) return
+        Log.w(TAG, "[RECORDING] forceReleaseStaleRecording reason=$reason active=$active")
+        finalizeStopIfNeeded("force_release_$reason")
+    }
 
     @Synchronized
     private fun finalizeStopIfNeeded(reason: String) {
@@ -145,7 +148,7 @@ class CameraXContinuousRecordingController(
         // O valor será sobrescrito na próxima startBaseRecording().
         val callback = onFinalizedCallback
         onFinalizedCallback = null
-        Log.d(TAG, "finalizeStopIfNeeded reason=$reason callback=${callback != null}")
+        Log.d(TAG, "[RECORDING] finalize reason=$reason callback=${callback != null}")
         callback?.invoke()
     }
 
