@@ -30,6 +30,9 @@ export const videoClips = pgTable(
     sizeBytes: bigint("size_bytes", { mode: "number" }).notNull().default(0),
     durationSeconds: integer("duration_seconds"),
     sourcePlatform: text("source_platform").notNull().default("android"),
+    localClipId: text("local_clip_id"),
+    uploadStatus: text("upload_status").notNull().default("uploaded"),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     uploadedAt: timestamp("uploaded_at", { withTimezone: true }).notNull().defaultNow(),
@@ -37,6 +40,13 @@ export const videoClips = pgTable(
   (table) => ({
     clientIdIdx: index("idx_video_clips_client_id").on(table.clientId),
     uploadedAtIdx: index("idx_video_clips_uploaded_at").on(table.uploadedAt),
+    recordedAtIdx: index("idx_video_clips_recorded_at").on(table.recordedAt),
     qrCodeIdIdx: index("idx_video_clips_qr_code_id").on(table.qrCodeId),
+    clientQrRecordedIdx: index("idx_video_clips_client_qr_recorded").on(
+      table.clientId,
+      table.qrCodeId,
+      table.recordedAt,
+    ),
+    uploadStatusIdx: index("idx_video_clips_upload_status").on(table.uploadStatus),
   }),
 );

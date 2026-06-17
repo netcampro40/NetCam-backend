@@ -21,6 +21,7 @@ async function main() {
     const seedSql = readFileSync(resolve(process.cwd(), "sql/002_seed_clients.sql"), "utf-8");
     const clientQrCodesSql = readFileSync(resolve(process.cwd(), "sql/006_client_qr_codes.sql"), "utf-8");
     const videoClipsSql = readFileSync(resolve(process.cwd(), "sql/007_video_clips.sql"), "utf-8");
+    const videoClipsRecordedAtSql = readFileSync(resolve(process.cwd(), "sql/008_video_clips_recorded_at.sql"), "utf-8");
     try {
         await pool.query(migrateArenasSql);
         await pool.query(initSql);
@@ -28,8 +29,9 @@ async function main() {
         await pool.query(backfillClientsSchemaSql);
         await pool.query(clientQrCodesSql);
         await pool.query(videoClipsSql);
+        await pool.query(videoClipsRecordedAtSql);
         await pool.query(seedSql);
-        console.log("Database: migrate arenas → init clients → address → backfill → QR codes → video clips → seed — OK.");
+        console.log("Database: migrate arenas → init clients → address → backfill → QR codes → video clips → recorded_at → seed — OK.");
     }
     finally {
         await pool.end();

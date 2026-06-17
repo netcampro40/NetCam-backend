@@ -7,11 +7,16 @@ import {
   buildClipS3Key,
   buildPrivateS3Uri,
   checkS3BucketAccess,
+  slugifyKitSegment,
   uploadVideoToS3,
 } from "../../../shared/aws/s3VideoService.js";
-import { validateClipUploadAccess } from "../application/validateClipUpload.usecase.js";
+import { validateClipUploadByQrToken } from "../application/validateClipUpload.usecase.js";
 import {
   insertVideoClip,
+  listArenasWithClips,
+  listClipDatesByClientAndKit,
+  listClipsByClientKitAndDate,
+  listKitsWithClipsByClientId,
   listVideoClipsByClientId,
   type VideoClipRow,
 } from "../repository/videoClip.repository.js";
@@ -50,9 +55,25 @@ function serializeClip(row: VideoClipRow) {
     sizeBytes: row.sizeBytes,
     durationSeconds: row.durationSeconds,
     sourcePlatform: row.sourcePlatform,
+    localClipId: row.localClipId,
+    uploadStatus: row.uploadStatus,
+    recordedAt: toIso(row.recordedAt),
     createdAt: toIso(row.createdAt),
     expiresAt: row.expiresAt ? toIso(row.expiresAt) : null,
     uploadedAt: toIso(row.uploadedAt),
+  };
+}
+
+function serializeGalleryClip(row: VideoClipRow) {
+  return {
+    id: row.id,
+    recordedAt: toIso(row.recordedAt),
+    uploadedAt: toIso(row.uploadedAt),
+    durationSeconds: row.durationSeconds,
+    fileKey: row.fileKey,
+    fileUrl: row.fileUrl,
+    sizeBytes: row.sizeBytes,
+    platform: row.sourcePlatform,
   };
 }
 
@@ -60,6 +81,13 @@ function normalizePlatform(value: string | undefined): "ios" | "android" | null 
   const v = (value ?? "").trim().toLowerCase();
   if (v === "ios" || v === "android") return v;
   return null;
+}
+
+function parseRecordedAt(value: string | undefined): Date | null {
+  if (!value?.trim()) return null;
+  const d = new Date(value.trim());
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
 }
 
 function resolveExtension(filename: string, mimeType: string): string {
@@ -77,11 +105,11 @@ function isAllowedVideoMime(mimeType: string): boolean {
 }
 
 type UploadFields = {
-  clientId?: string;
   qrToken?: string;
   platform?: string;
-  kitLabel?: string;
+  recordedAt?: string;
   durationSeconds?: string;
+  localClipId?: string;
 };
 
 export async function clipsRoutes(app: FastifyInstance) {
@@ -114,6 +142,78 @@ export async function clipsRoutes(app: FastifyInstance) {
       return reply.status(503).send({
         ok: false,
         error: "s3_health_failed",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  });
+
+  app.get("/arenas", async (request, reply) => {
+    try {
+      const arenas = await listArenasWithClips();
+      return reply.send({
+        arenas: arenas.map((a) => ({
+          clientId: a.clientId,
+          arenaName: a.arenaName,
+          nomeFantasia: a.arenaName,
+          totalClips: a.totalClips,
+        })),
+      });
+    } catch (e) {
+      request.log.error({ err: e }, "list_arenas_failed");
+      return reply.status(500).send({
+        error: "list_arenas_failed",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  });
+
+  app.get(
+    "/clients/:clientId/kits/:qrCodeId/dates/:date",
+    async (request, reply) => {
+      const { clientId, qrCodeId, date } = request.params as {
+        clientId: string;
+        qrCodeId: string;
+        date: string;
+      };
+      try {
+        const rows = await listClipsByClientKitAndDate(clientId, qrCodeId, date);
+        return reply.send({ clips: rows.map(serializeGalleryClip) });
+      } catch (e) {
+        request.log.error({ err: e, clientId, qrCodeId, date }, "list_clips_by_date_failed");
+        return reply.status(500).send({
+          error: "list_clips_by_date_failed",
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
+    },
+  );
+
+  app.get("/clients/:clientId/kits/:qrCodeId/dates", async (request, reply) => {
+    const { clientId, qrCodeId } = request.params as {
+      clientId: string;
+      qrCodeId: string;
+    };
+    try {
+      const dates = await listClipDatesByClientAndKit(clientId, qrCodeId);
+      return reply.send({ dates });
+    } catch (e) {
+      request.log.error({ err: e, clientId, qrCodeId }, "list_clip_dates_failed");
+      return reply.status(500).send({
+        error: "list_clip_dates_failed",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  });
+
+  app.get("/clients/:clientId/kits", async (request, reply) => {
+    const { clientId } = request.params as { clientId: string };
+    try {
+      const kits = await listKitsWithClipsByClientId(clientId);
+      return reply.send({ kits });
+    } catch (e) {
+      request.log.error({ err: e, clientId }, "list_kits_failed");
+      return reply.status(500).send({
+        error: "list_kits_failed",
         message: e instanceof Error ? e.message : String(e),
       });
     }
@@ -158,11 +258,11 @@ export async function clipsRoutes(app: FastifyInstance) {
           continue;
         }
         const value = String(part.value ?? "");
-        if (part.fieldname === "clientId") fields.clientId = value;
         if (part.fieldname === "qrToken") fields.qrToken = value;
         if (part.fieldname === "platform") fields.platform = value;
-        if (part.fieldname === "kitLabel") fields.kitLabel = value;
+        if (part.fieldname === "recordedAt") fields.recordedAt = value;
         if (part.fieldname === "durationSeconds") fields.durationSeconds = value;
+        if (part.fieldname === "localClipId") fields.localClipId = value;
       }
     } catch (e) {
       request.log.error({ err: e }, "upload_parse_failed");
@@ -172,14 +272,25 @@ export async function clipsRoutes(app: FastifyInstance) {
       });
     }
 
-    const clientId = fields.clientId?.trim() ?? "";
-    if (!clientId) {
-      return reply.status(400).send({ error: "client_id_required" });
+    const qrToken = fields.qrToken?.trim() ?? "";
+    if (!qrToken) {
+      return reply.status(400).send({
+        error: "qr_token_required",
+        message: "QR Token é obrigatório.",
+      });
     }
 
     const platform = normalizePlatform(fields.platform);
     if (!platform) {
       return reply.status(400).send({ error: "invalid_platform", message: "Use ios ou android." });
+    }
+
+    const recordedAt = parseRecordedAt(fields.recordedAt);
+    if (!recordedAt) {
+      return reply.status(400).send({
+        error: "invalid_recorded_at",
+        message: "recordedAt é obrigatório e deve ser uma data/hora ISO válida.",
+      });
     }
 
     if (!videoBuffer || videoBuffer.length === 0) {
@@ -200,11 +311,7 @@ export async function clipsRoutes(app: FastifyInstance) {
       });
     }
 
-    const access = await validateClipUploadAccess(
-      clientId,
-      fields.qrToken,
-      fields.kitLabel,
-    );
+    const access = await validateClipUploadByQrToken(qrToken);
     if (!access.ok) {
       return reply.status(403).send({
         error: access.reason,
@@ -214,7 +321,8 @@ export async function clipsRoutes(app: FastifyInstance) {
 
     const clipId = randomUUID();
     const extension = resolveExtension(originalFilename, videoMime);
-    const fileKey = buildClipS3Key(clientId, clipId, extension);
+    const kitSegment = slugifyKitSegment(access.kitLabel, access.qrCodeId);
+    const fileKey = buildClipS3Key(access.clientId, recordedAt, kitSegment, clipId, extension);
 
     let durationSeconds: number | null = null;
     if (fields.durationSeconds) {
@@ -222,14 +330,17 @@ export async function clipsRoutes(app: FastifyInstance) {
       if (!Number.isNaN(parsed) && parsed >= 0) durationSeconds = parsed;
     }
 
+    const localClipId = fields.localClipId?.trim() || null;
+
     request.log.info(
       {
-        clientId,
+        clientId: access.clientId,
         clipId,
         fileKey,
         sizeBytes: videoBuffer.length,
         mimeType: videoMime,
         platform,
+        recordedAt: recordedAt.toISOString(),
       },
       "s3_upload_started",
     );
@@ -243,7 +354,7 @@ export async function clipsRoutes(app: FastifyInstance) {
 
       request.log.info(
         {
-          clientId,
+          clientId: access.clientId,
           clipId,
           fileKey: uploadResult.key,
           etag: uploadResult.etag,
@@ -265,13 +376,21 @@ export async function clipsRoutes(app: FastifyInstance) {
         sizeBytes: videoBuffer.length,
         durationSeconds,
         sourcePlatform: platform,
+        localClipId,
+        recordedAt,
       });
 
-      request.log.info({ clipId: row.id, clientId, fileKey: row.fileKey }, "clip_saved_to_database");
+      request.log.info(
+        { clipId: row.id, clientId: access.clientId, fileKey: row.fileKey },
+        "clip_saved_to_database",
+      );
 
       return reply.status(201).send({ clip: serializeClip(row) });
     } catch (e) {
-      request.log.error({ err: e, clientId, clipId, fileKey }, "s3_upload_failed");
+      request.log.error(
+        { err: e, clientId: access.clientId, clipId, fileKey },
+        "s3_upload_failed",
+      );
       return reply.status(500).send({
         error: "upload_failed",
         message: e instanceof Error ? e.message : String(e),

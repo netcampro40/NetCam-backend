@@ -14,7 +14,11 @@ export function ensureDatabaseSchema(): Promise<void> {
     schemaReady = (async () => {
       const pool = new Pool({ connectionString: env.databaseUrl });
       try {
-        const migrations = ["006_client_qr_codes.sql", "007_video_clips.sql"];
+        const migrations = [
+          "006_client_qr_codes.sql",
+          "007_video_clips.sql",
+          "008_video_clips_recorded_at.sql",
+        ];
         for (const file of migrations) {
           const sql = readFileSync(resolve(backendRoot, "sql", file), "utf-8");
           await pool.query(sql);

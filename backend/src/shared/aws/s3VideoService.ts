@@ -60,9 +60,36 @@ export async function checkS3BucketAccess(): Promise<{ ok: true; bucket: string;
   return { ok: true, bucket: env.aws.s3Bucket, region: env.aws.region };
 }
 
-export function buildClipS3Key(clientId: string, clipId: string, extension = "mp4"): string {
-  const date = new Date().toISOString().slice(0, 10);
-  return `clients/${clientId}/${date}/${clipId}.${extension}`;
+/** Segmento de pasta para kit/controle no S3 (ex.: kit-1). */
+export function slugifyKitSegment(kitLabel: string, qrCodeId: string | null): string {
+  const fromLabel = kitLabel
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (fromLabel) return fromLabel;
+  if (qrCodeId) return qrCodeId;
+  return "unknown-kit";
+}
+
+export function formatRecordedDateUtc(recordedAt: Date): string {
+  return recordedAt.toISOString().slice(0, 10);
+}
+
+/**
+ * clients/{clientId}/{YYYY-MM-DD}/{kitSegment}/{clipId}.mp4
+ * A data vem do horário real da gravação (recordedAt).
+ */
+export function buildClipS3Key(
+  clientId: string,
+  recordedAt: Date,
+  kitSegment: string,
+  clipId: string,
+  extension = "mp4",
+): string {
+  const date = formatRecordedDateUtc(recordedAt);
+  const safeKit = slugifyKitSegment(kitSegment, null);
+  return `clients/${clientId}/${date}/${safeKit}/${clipId}.${extension}`;
 }
 
 export function buildPrivateS3Uri(bucket: string, key: string): string {

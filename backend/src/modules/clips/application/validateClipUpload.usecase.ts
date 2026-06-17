@@ -12,16 +12,41 @@ export type ClipUploadAccessResult =
     }
   | {
       ok: false;
-      reason: "client_not_found" | "inactive_client" | "invalid_qr" | "inactive_qr";
+      reason: "invalid_qr" | "inactive_qr" | "inactive_client" | "client_not_found";
       message: string;
     };
 
-export async function validateClipUploadAccess(
-  clientId: string,
-  qrToken?: string,
-  kitLabelFromRequest?: string,
+/** Resolve cliente/arena/kit exclusivamente pelo qrToken usado na gravação. */
+export async function validateClipUploadByQrToken(
+  qrToken: string,
 ): Promise<ClipUploadAccessResult> {
-  const client = await findClientById(clientId);
+  const token = qrToken.trim();
+  if (!token) {
+    return {
+      ok: false,
+      reason: "invalid_qr",
+      message: "QR Token é obrigatório.",
+    };
+  }
+
+  const fromQr = await findClientByQrToken(token);
+  if (!fromQr) {
+    return {
+      ok: false,
+      reason: "invalid_qr",
+      message: "QR Code inválido.",
+    };
+  }
+
+  if (!fromQr.isQrActive) {
+    return {
+      ok: false,
+      reason: "inactive_qr",
+      message: "QR Code inativo.",
+    };
+  }
+
+  const client = await findClientById(fromQr.id);
   if (!client) {
     return {
       ok: false,
@@ -38,33 +63,9 @@ export async function validateClipUploadAccess(
     };
   }
 
-  let qrCodeId: string | null = null;
-  let kitLabel = kitLabelFromRequest?.trim() ?? "";
-
-  if (qrToken && qrToken.trim().length > 0) {
-    const token = qrToken.trim();
-    const fromQr = await findClientByQrToken(token);
-    if (!fromQr || fromQr.id !== clientId) {
-      return {
-        ok: false,
-        reason: "invalid_qr",
-        message: "QR Code inválido para este cliente.",
-      };
-    }
-    if (!fromQr.isQrActive) {
-      return {
-        ok: false,
-        reason: "inactive_qr",
-        message: "QR Code inativo.",
-      };
-    }
-
-    const qrRow = await findQrCodeByToken(token);
-    if (qrRow) {
-      qrCodeId = qrRow.id;
-      if (!kitLabel) kitLabel = qrRow.label;
-    }
-  }
+  const qrRow = await findQrCodeByToken(token);
+  const qrCodeId = qrRow?.id ?? null;
+  const kitLabel = qrRow?.label ?? "Kit 1";
 
   return {
     ok: true,
