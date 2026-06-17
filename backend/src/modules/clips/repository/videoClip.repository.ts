@@ -118,6 +118,22 @@ export async function findVideoClipById(id: string): Promise<VideoClipRow | null
   return row ?? null;
 }
 
+export async function updateVideoClipPreview(
+  clipId: string,
+  previewFileKey: string,
+  previewFileUrl: string,
+): Promise<VideoClipRow | null> {
+  const [row] = await db
+    .update(videoClips)
+    .set({
+      previewFileKey,
+      previewFileUrl,
+    })
+    .where(eq(videoClips.id, clipId))
+    .returning(rowSelect);
+  return row ?? null;
+}
+
 export type ArenaClipsSummary = {
   clientId: string;
   arenaName: string;

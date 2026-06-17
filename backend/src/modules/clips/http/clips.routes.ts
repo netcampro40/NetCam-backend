@@ -4,6 +4,7 @@ import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import multipart from "@fastify/multipart";
 import { env, hasAwsCredentials } from "../../../shared/config/env.js";
 import {
+  buildClipPreviewS3Key,
   buildClipS3Key,
   buildPrivateS3Uri,
   checkS3BucketAccess,
@@ -17,6 +18,7 @@ import { resolveClipPlaybackFile } from "../application/resolveClipPlaybackFile.
 import {
   insertVideoClip,
   findVideoClipById,
+  updateVideoClipPreview,
   listArenasWithClips,
   listClipDatesByClientAndKit,
   listClipsByClientKitAndDate,
@@ -121,11 +123,38 @@ type UploadFields = {
 const CLIP_ID_UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+async function uploadPreviewForClip(
+  params: {
+    clientId: string;
+    recordedAt: Date;
+    kitLabel: string;
+    qrCodeId: string | null;
+    clipId: string;
+  },
+  previewBuffer: Buffer,
+  previewMime: string,
+): Promise<{ previewFileKey: string; previewFileUrl: string }> {
+  const kitSegment = slugifyKitSegment(params.kitLabel, params.qrCodeId);
+  const previewFileKey = buildClipPreviewS3Key(
+    params.clientId,
+    params.recordedAt,
+    kitSegment,
+    params.clipId,
+  );
+  const previewUpload = await uploadVideoToS3({
+    key: previewFileKey,
+    body: previewBuffer,
+    contentType: previewMime.split(";")[0]?.trim() ?? "video/mp4",
+  });
+  const previewFileUrl = buildPrivateS3Uri(previewUpload.bucket, previewUpload.key);
+  return { previewFileKey: previewUpload.key, previewFileUrl };
+}
+
 export async function clipsRoutes(app: FastifyInstance) {
   await app.register(multipart, {
     limits: {
       fileSize: env.clips.maxUploadBytes,
-      files: 1,
+      files: 2,
     },
   });
 
@@ -311,6 +340,104 @@ export async function clipsRoutes(app: FastifyInstance) {
     }
   });
 
+  app.post("/:clipId/preview", async (request: FastifyRequest, reply: FastifyReply) => {
+    const clipId = ((request.params as { clipId: string }).clipId ?? "").trim();
+
+    if (!clipId || !CLIP_ID_UUID_REGEX.test(clipId)) {
+      return reply.status(400).send({
+        error: "invalid_clip_id",
+        message: "clipId inválido.",
+      });
+    }
+
+    if (!hasAwsCredentials()) {
+      return reply.status(503).send({
+        error: "aws_credentials_missing",
+        message: "Upload de preview indisponível: credenciais AWS não configuradas.",
+      });
+    }
+
+    let previewBuffer: Buffer | null = null;
+    let previewMime = "video/mp4";
+
+    try {
+      for await (const part of request.parts()) {
+        if (part.type === "file" && part.fieldname === "preview") {
+          previewMime = part.mimetype ?? "video/mp4";
+          previewBuffer = await part.toBuffer();
+        }
+      }
+    } catch (e) {
+      request.log.error({ err: e, clipId }, "preview_upload_parse_failed");
+      return reply.status(400).send({
+        error: "invalid_multipart",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+
+    if (!previewBuffer || previewBuffer.length === 0) {
+      return reply.status(400).send({
+        error: "preview_required",
+        message: "Arquivo preview é obrigatório.",
+      });
+    }
+
+    if (!isAllowedVideoMime(previewMime)) {
+      return reply.status(415).send({
+        error: "unsupported_media_type",
+        message: `Tipo de preview não permitido: ${previewMime}`,
+      });
+    }
+
+    try {
+      const clip = await findVideoClipById(clipId);
+      if (!clip) {
+        return reply.status(404).send({
+          error: "clip_not_found",
+          message: "Clipe não encontrado.",
+        });
+      }
+
+      const previewUpload = await uploadPreviewForClip(
+        {
+          clientId: clip.clientId,
+          recordedAt: clip.recordedAt,
+          kitLabel: clip.kitLabel,
+          qrCodeId: clip.qrCodeId,
+          clipId,
+        },
+        previewBuffer,
+        previewMime,
+      );
+
+      const row = await updateVideoClipPreview(
+        clipId,
+        previewUpload.previewFileKey,
+        previewUpload.previewFileUrl,
+      );
+      if (!row) {
+        return reply.status(500).send({
+          error: "preview_update_failed",
+          message: "Falha ao salvar preview no banco.",
+        });
+      }
+
+      request.log.info({ clipId, previewFileKey: previewUpload.previewFileKey }, "s3_preview_upload_success");
+
+      return reply.send({
+        clipId,
+        previewFileKey: previewUpload.previewFileKey,
+        previewFileUrl: previewUpload.previewFileUrl,
+      });
+    } catch (e) {
+      request.log.error({ err: e, clipId }, "preview_upload_failed");
+      return reply.status(500).send({
+        error: "preview_upload_failed",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  });
+
   app.post("/upload", async (request: FastifyRequest, reply: FastifyReply) => {
     if (!hasAwsCredentials()) {
       return reply.status(503).send({
@@ -323,16 +450,23 @@ export async function clipsRoutes(app: FastifyInstance) {
     let videoBuffer: Buffer | null = null;
     let videoMime = "";
     let originalFilename = "clip.mp4";
+    let previewBuffer: Buffer | null = null;
+    let previewMime = "video/mp4";
 
     try {
       for await (const part of request.parts()) {
         if (part.type === "file") {
-          if (part.fieldname !== "video") {
+          if (part.fieldname === "video") {
+            videoMime = part.mimetype ?? "application/octet-stream";
+            originalFilename = part.filename ?? originalFilename;
+            videoBuffer = await part.toBuffer();
             continue;
           }
-          videoMime = part.mimetype ?? "application/octet-stream";
-          originalFilename = part.filename ?? originalFilename;
-          videoBuffer = await part.toBuffer();
+          if (part.fieldname === "preview") {
+            previewMime = part.mimetype ?? "video/mp4";
+            previewBuffer = await part.toBuffer();
+            continue;
+          }
           continue;
         }
         const value = String(part.value ?? "");
@@ -441,6 +575,32 @@ export async function clipsRoutes(app: FastifyInstance) {
       );
 
       const fileUrl = buildPrivateS3Uri(uploadResult.bucket, uploadResult.key);
+
+      let previewFileKey: string | null = null;
+      let previewFileUrl: string | null = null;
+      if (previewBuffer && previewBuffer.length > 0) {
+        if (!isAllowedVideoMime(previewMime)) {
+          return reply.status(415).send({
+            error: "unsupported_media_type",
+            message: `Tipo de preview não permitido: ${previewMime}`,
+          });
+        }
+        const previewUpload = await uploadPreviewForClip(
+          {
+            clientId: access.clientId,
+            recordedAt,
+            kitLabel: access.kitLabel,
+            qrCodeId: access.qrCodeId,
+            clipId,
+          },
+          previewBuffer,
+          previewMime,
+        );
+        previewFileKey = previewUpload.previewFileKey;
+        previewFileUrl = previewUpload.previewFileUrl;
+        request.log.info({ clipId, previewFileKey }, "s3_preview_upload_success");
+      }
+
       const row = await insertVideoClip({
         id: clipId,
         clientId: access.clientId,
@@ -451,6 +611,8 @@ export async function clipsRoutes(app: FastifyInstance) {
         fileUrl,
         originalFileKey: uploadResult.key,
         originalFileUrl: fileUrl,
+        previewFileKey,
+        previewFileUrl,
         originalFilename,
         mimeType: videoMime.split(";")[0]?.trim() ?? "video/mp4",
         sizeBytes: videoBuffer.length,

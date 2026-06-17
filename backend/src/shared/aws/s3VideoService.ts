@@ -93,6 +93,20 @@ export function buildClipS3Key(
   return `clients/${clientId}/${date}/${safeKit}/${clipId}.${extension}`;
 }
 
+/**
+ * clients/{clientId}/{YYYY-MM-DD}/{kitSegment}/{clipId}_preview.mp4
+ */
+export function buildClipPreviewS3Key(
+  clientId: string,
+  recordedAt: Date,
+  kitSegment: string,
+  clipId: string,
+): string {
+  const date = formatRecordedDateUtc(recordedAt);
+  const safeKit = slugifyKitSegment(kitSegment, null);
+  return `clients/${clientId}/${date}/${safeKit}/${clipId}_preview.mp4`;
+}
+
 export function buildPrivateS3Uri(bucket: string, key: string): string {
   return `s3://${bucket}/${key}`;
 }
