@@ -18,6 +18,7 @@ export function ensureDatabaseSchema(): Promise<void> {
           "006_client_qr_codes.sql",
           "007_video_clips.sql",
           "008_video_clips_recorded_at.sql",
+          "009_video_clips_original_preview.sql",
         ];
         for (const file of migrations) {
           const sql = readFileSync(resolve(backendRoot, "sql", file), "utf-8");

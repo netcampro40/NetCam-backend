@@ -10,6 +10,10 @@ export type VideoClipRow = {
   kitLabel: string;
   fileKey: string;
   fileUrl: string;
+  originalFileKey: string | null;
+  originalFileUrl: string | null;
+  previewFileKey: string | null;
+  previewFileUrl: string | null;
   originalFilename: string;
   mimeType: string;
   sizeBytes: number;
@@ -31,6 +35,10 @@ const rowSelect = {
   kitLabel: videoClips.kitLabel,
   fileKey: videoClips.fileKey,
   fileUrl: videoClips.fileUrl,
+  originalFileKey: videoClips.originalFileKey,
+  originalFileUrl: videoClips.originalFileUrl,
+  previewFileKey: videoClips.previewFileKey,
+  previewFileUrl: videoClips.previewFileUrl,
   originalFilename: videoClips.originalFilename,
   mimeType: videoClips.mimeType,
   sizeBytes: videoClips.sizeBytes,
@@ -52,6 +60,10 @@ export type NewVideoClipInput = {
   kitLabel: string;
   fileKey: string;
   fileUrl: string;
+  originalFileKey?: string | null;
+  originalFileUrl?: string | null;
+  previewFileKey?: string | null;
+  previewFileUrl?: string | null;
   originalFilename: string;
   mimeType: string;
   sizeBytes: number;
@@ -74,6 +86,10 @@ export async function insertVideoClip(input: NewVideoClipInput): Promise<VideoCl
       kitLabel: input.kitLabel,
       fileKey: input.fileKey,
       fileUrl: input.fileUrl,
+      originalFileKey: input.originalFileKey ?? input.fileKey,
+      originalFileUrl: input.originalFileUrl ?? input.fileUrl,
+      previewFileKey: input.previewFileKey ?? null,
+      previewFileUrl: input.previewFileUrl ?? null,
       originalFilename: input.originalFilename,
       mimeType: input.mimeType,
       sizeBytes: input.sizeBytes,

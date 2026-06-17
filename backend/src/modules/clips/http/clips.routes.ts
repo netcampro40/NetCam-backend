@@ -13,6 +13,7 @@ import {
   uploadVideoToS3,
 } from "../../../shared/aws/s3VideoService.js";
 import { validateClipUploadByQrToken } from "../application/validateClipUpload.usecase.js";
+import { resolveClipPlaybackFile } from "../application/resolveClipPlaybackFile.js";
 import {
   insertVideoClip,
   findVideoClipById,
@@ -280,22 +281,26 @@ export async function clipsRoutes(app: FastifyInstance) {
         });
       }
 
-      const fileKey = clip.fileKey?.trim() ?? "";
-      if (!fileKey) {
+      const playback = resolveClipPlaybackFile(clip);
+      if (!playback) {
         request.log.warn({ clipId }, "clip_play_url_failed");
         return reply.status(422).send({
           error: "file_key_missing",
-          message: "Clipe sem fileKey configurado.",
+          message: "Clipe sem arquivo configurado para reprodução.",
         });
       }
 
-      const playUrl = await createSignedClipPlayUrl(fileKey);
-      request.log.info({ clipId, fileKey }, "clip_play_url_success");
+      const playUrl = await createSignedClipPlayUrl(playback.fileKey);
+      request.log.info(
+        { clipId, fileKey: playback.fileKey, source: playback.source },
+        "clip_play_url_success",
+      );
 
       return reply.send({
         clipId,
         playUrl,
         expiresIn: CLIP_PLAY_URL_EXPIRES_SECONDS,
+        source: playback.source,
       });
     } catch (e) {
       request.log.error({ err: e, clipId }, "clip_play_url_failed");
@@ -444,6 +449,8 @@ export async function clipsRoutes(app: FastifyInstance) {
         kitLabel: access.kitLabel,
         fileKey: uploadResult.key,
         fileUrl,
+        originalFileKey: uploadResult.key,
+        originalFileUrl: fileUrl,
         originalFilename,
         mimeType: videoMime.split(";")[0]?.trim() ?? "video/mp4",
         sizeBytes: videoBuffer.length,
