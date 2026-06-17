@@ -68,6 +68,15 @@ export async function findQrCodeById(id: string): Promise<ClientQrCodeRow | null
   return row ?? null;
 }
 
+export async function findQrCodeByToken(qrToken: string): Promise<ClientQrCodeRow | null> {
+  const [row] = await db
+    .select(rowSelect)
+    .from(clientQrCodes)
+    .where(eq(clientQrCodes.qrToken, qrToken))
+    .limit(1);
+  return row ?? null;
+}
+
 export async function findClientByQrCodeToken(qrToken: string) {
   const [row] = await db
     .select({

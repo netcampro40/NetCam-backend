@@ -2,6 +2,7 @@ import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { adminRoutes } from "./modules/admin/http/admin.routes.js";
 import { authRoutes } from "./modules/auth/http/auth.routes.js";
+import { clipsRoutes } from "./modules/clips/http/clips.routes.js";
 import { ensureDatabaseSchema } from "./shared/db/ensureSchema.js";
 
 export async function buildApp() {
@@ -9,6 +10,7 @@ export async function buildApp() {
 
   const app = Fastify({
     logger: true,
+    bodyLimit: 500 * 1024 * 1024,
   });
 
   app.setErrorHandler((error, request, reply) => {
@@ -35,6 +37,7 @@ export async function buildApp() {
 
   await app.register(authRoutes);
   await app.register(adminRoutes, { prefix: "/api/admin" });
+  await app.register(clipsRoutes, { prefix: "/api/clips" });
 
   return app;
 }
