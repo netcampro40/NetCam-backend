@@ -1,4 +1,5 @@
-import { HeadBucketCommand, S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, HeadBucketCommand, S3Client } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { Upload } from "@aws-sdk/lib-storage";
 import { env, hasAwsCredentials } from "../config/env.js";
 
@@ -94,4 +95,17 @@ export function buildClipS3Key(
 
 export function buildPrivateS3Uri(bucket: string, key: string): string {
   return `s3://${bucket}/${key}`;
+}
+
+/** Tempo de validade da URL assinada para reprodução (15 minutos). */
+export const CLIP_PLAY_URL_EXPIRES_SECONDS = 900;
+
+/** Gera URL assinada temporária para GET do objeto no S3 (bucket privado). */
+export async function createSignedClipPlayUrl(fileKey: string): Promise<string> {
+  const client = getS3Client();
+  const command = new GetObjectCommand({
+    Bucket: env.aws.s3Bucket,
+    Key: fileKey,
+  });
+  return getSignedUrl(client, command, { expiresIn: CLIP_PLAY_URL_EXPIRES_SECONDS });
 }

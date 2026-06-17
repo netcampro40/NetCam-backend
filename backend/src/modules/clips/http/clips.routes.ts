@@ -7,12 +7,15 @@ import {
   buildClipS3Key,
   buildPrivateS3Uri,
   checkS3BucketAccess,
+  CLIP_PLAY_URL_EXPIRES_SECONDS,
+  createSignedClipPlayUrl,
   slugifyKitSegment,
   uploadVideoToS3,
 } from "../../../shared/aws/s3VideoService.js";
 import { validateClipUploadByQrToken } from "../application/validateClipUpload.usecase.js";
 import {
   insertVideoClip,
+  findVideoClipById,
   listArenasWithClips,
   listClipDatesByClientAndKit,
   listClipsByClientKitAndDate,
@@ -113,6 +116,9 @@ type UploadFields = {
   durationSeconds?: string;
   localClipId?: string;
 };
+
+const CLIP_ID_UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export async function clipsRoutes(app: FastifyInstance) {
   await app.register(multipart, {
@@ -230,6 +236,71 @@ export async function clipsRoutes(app: FastifyInstance) {
       request.log.error({ err: e, clientId }, "list_clips_failed");
       return reply.status(500).send({
         error: "list_clips_failed",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  });
+
+  app.get("/:clipId/play", async (request, reply) => {
+    const clipId = ((request.params as { clipId: string }).clipId ?? "").trim();
+
+    request.log.info({ clipId }, "clip_play_url_requested");
+
+    if (!clipId) {
+      request.log.warn({ clipId }, "clip_play_url_failed");
+      return reply.status(400).send({
+        error: "clip_id_required",
+        message: "clipId é obrigatório.",
+      });
+    }
+
+    if (!CLIP_ID_UUID_REGEX.test(clipId)) {
+      request.log.warn({ clipId }, "clip_play_url_failed");
+      return reply.status(400).send({
+        error: "invalid_clip_id",
+        message: "clipId inválido.",
+      });
+    }
+
+    if (!hasAwsCredentials()) {
+      request.log.warn({ clipId }, "clip_play_url_failed");
+      return reply.status(503).send({
+        error: "aws_credentials_missing",
+        message: "Reprodução indisponível: credenciais AWS não configuradas.",
+      });
+    }
+
+    try {
+      const clip = await findVideoClipById(clipId);
+      if (!clip) {
+        request.log.warn({ clipId }, "clip_play_url_failed");
+        return reply.status(404).send({
+          error: "clip_not_found",
+          message: "Clipe não encontrado.",
+        });
+      }
+
+      const fileKey = clip.fileKey?.trim() ?? "";
+      if (!fileKey) {
+        request.log.warn({ clipId }, "clip_play_url_failed");
+        return reply.status(422).send({
+          error: "file_key_missing",
+          message: "Clipe sem fileKey configurado.",
+        });
+      }
+
+      const playUrl = await createSignedClipPlayUrl(fileKey);
+      request.log.info({ clipId, fileKey }, "clip_play_url_success");
+
+      return reply.send({
+        clipId,
+        playUrl,
+        expiresIn: CLIP_PLAY_URL_EXPIRES_SECONDS,
+      });
+    } catch (e) {
+      request.log.error({ err: e, clipId }, "clip_play_url_failed");
+      return reply.status(500).send({
+        error: "clip_play_url_failed",
         message: e instanceof Error ? e.message : String(e),
       });
     }
