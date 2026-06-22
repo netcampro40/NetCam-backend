@@ -7,6 +7,7 @@ export type S3UploadInput = {
   key: string;
   body: Buffer;
   contentType: string;
+  cacheControl?: string;
 };
 
 export type S3UploadResult = {
@@ -42,6 +43,7 @@ export async function uploadVideoToS3(input: S3UploadInput): Promise<S3UploadRes
       Key: input.key,
       Body: input.body,
       ContentType: input.contentType,
+      ...(input.cacheControl ? { CacheControl: input.cacheControl } : {}),
     },
   });
   const result = await upload.done();
@@ -107,6 +109,20 @@ export function buildClipPreviewS3Key(
   return `clients/${clientId}/${date}/${safeKit}/${clipId}_preview.mp4`;
 }
 
+/**
+ * clients/{clientId}/{YYYY-MM-DD}/{kitSegment}/{clipId}_thumbnail.jpg
+ */
+export function buildClipThumbnailS3Key(
+  clientId: string,
+  recordedAt: Date,
+  kitSegment: string,
+  clipId: string,
+): string {
+  const date = formatRecordedDateUtc(recordedAt);
+  const safeKit = slugifyKitSegment(kitSegment, null);
+  return `clients/${clientId}/${date}/${safeKit}/${clipId}_thumbnail.jpg`;
+}
+
 export function buildPrivateS3Uri(bucket: string, key: string): string {
   return `s3://${bucket}/${key}`;
 }
@@ -114,12 +130,24 @@ export function buildPrivateS3Uri(bucket: string, key: string): string {
 /** Tempo de validade da URL assinada para reprodução (15 minutos). */
 export const CLIP_PLAY_URL_EXPIRES_SECONDS = 900;
 
+/** Tempo de validade da URL assinada para thumbnail na listagem (1 hora). */
+export const CLIP_THUMBNAIL_URL_EXPIRES_SECONDS = 3600;
+
 /** Gera URL assinada temporária para GET do objeto no S3 (bucket privado). */
 export async function createSignedClipPlayUrl(fileKey: string): Promise<string> {
+  return createSignedS3ObjectUrl(fileKey, CLIP_PLAY_URL_EXPIRES_SECONDS);
+}
+
+/** Gera URL assinada temporária para thumbnail JPEG no S3. */
+export async function createSignedThumbnailUrl(fileKey: string): Promise<string> {
+  return createSignedS3ObjectUrl(fileKey, CLIP_THUMBNAIL_URL_EXPIRES_SECONDS);
+}
+
+async function createSignedS3ObjectUrl(fileKey: string, expiresIn: number): Promise<string> {
   const client = getS3Client();
   const command = new GetObjectCommand({
     Bucket: env.aws.s3Bucket,
     Key: fileKey,
   });
-  return getSignedUrl(client, command, { expiresIn: CLIP_PLAY_URL_EXPIRES_SECONDS });
+  return getSignedUrl(client, command, { expiresIn });
 }

@@ -19,11 +19,16 @@ export function ensureDatabaseSchema(): Promise<void> {
           "007_video_clips.sql",
           "008_video_clips_recorded_at.sql",
           "009_video_clips_original_preview.sql",
+          "010_video_clips_thumbnail.sql",
         ];
         for (const file of migrations) {
           const sql = readFileSync(resolve(backendRoot, "sql", file), "utf-8");
           await pool.query(sql);
+          console.log(`database_schema_migration_applied file=${file}`);
         }
+      } catch (error) {
+        console.error("database_schema_migration_failed", error);
+        throw error;
       } finally {
         await pool.end();
       }

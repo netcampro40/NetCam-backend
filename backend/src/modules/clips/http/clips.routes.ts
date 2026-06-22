@@ -10,15 +10,20 @@ import {
   checkS3BucketAccess,
   CLIP_PLAY_URL_EXPIRES_SECONDS,
   createSignedClipPlayUrl,
+  createSignedThumbnailUrl,
   slugifyKitSegment,
   uploadVideoToS3,
 } from "../../../shared/aws/s3VideoService.js";
 import { validateClipUploadByQrToken } from "../application/validateClipUpload.usecase.js";
 import { resolveClipPlaybackFile } from "../application/resolveClipPlaybackFile.js";
+import { uploadThumbnailForClip } from "../application/uploadThumbnailForClip.js";
+import { serializeGalleryClipsResponse } from "../application/serializeGalleryClipResponse.js";
+import { validateThumbnailFile } from "../application/validateThumbnailFile.js";
 import {
   insertVideoClip,
   findVideoClipById,
   updateVideoClipPreview,
+  updateVideoClipThumbnail,
   listArenasWithClips,
   listClipDatesByClientAndKit,
   listClipsByClientKitAndDate,
@@ -68,20 +73,6 @@ function serializeClip(row: VideoClipRow) {
     createdAt: toIso(row.createdAt),
     expiresAt: row.expiresAt ? toIso(row.expiresAt) : null,
     uploadedAt: toIso(row.uploadedAt),
-  };
-}
-
-function serializeGalleryClip(row: VideoClipRow) {
-  return {
-    id: row.id,
-    clipId: row.id,
-    recordedAt: toIso(row.recordedAt),
-    uploadedAt: toIso(row.uploadedAt),
-    durationSeconds: row.durationSeconds,
-    fileKey: row.fileKey,
-    fileUrl: row.fileUrl,
-    sizeBytes: row.sizeBytes,
-    platform: row.sourcePlatform,
   };
 }
 
@@ -215,7 +206,13 @@ export async function clipsRoutes(app: FastifyInstance) {
       };
       try {
         const rows = await listClipsByClientKitAndDate(clientId, qrCodeId, date);
-        return reply.send({ clips: rows.map(serializeGalleryClip) });
+        const clips = await serializeGalleryClipsResponse(rows);
+        for (const clip of clips) {
+          if (clip.thumbnailUrl) {
+            request.log.info({ clipId: clip.clipId, urlPresent: true }, "thumbnail_url_generated");
+          }
+        }
+        return reply.send({ clips });
       } catch (e) {
         request.log.error({ err: e, clientId, qrCodeId, date }, "list_clips_by_date_failed");
         return reply.status(500).send({
@@ -433,6 +430,141 @@ export async function clipsRoutes(app: FastifyInstance) {
       request.log.error({ err: e, clipId }, "preview_upload_failed");
       return reply.status(500).send({
         error: "preview_upload_failed",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  });
+
+  app.post("/:clipId/thumbnail", async (request: FastifyRequest, reply: FastifyReply) => {
+    const clipId = ((request.params as { clipId: string }).clipId ?? "").trim();
+
+    if (!clipId || !CLIP_ID_UUID_REGEX.test(clipId)) {
+      return reply.status(400).send({
+        error: "invalid_clip_id",
+        message: "clipId inválido.",
+      });
+    }
+
+    if (!hasAwsCredentials()) {
+      return reply.status(503).send({
+        error: "aws_credentials_missing",
+        message: "Upload de thumbnail indisponível: credenciais AWS não configuradas.",
+      });
+    }
+
+    let thumbnailBuffer: Buffer | null = null;
+    let thumbnailMime = "image/jpeg";
+    let thumbnailFilename = "thumbnail.jpg";
+
+    try {
+      for await (const part of request.parts()) {
+        if (part.type === "file" && part.fieldname === "thumbnail") {
+          thumbnailMime = part.mimetype ?? "image/jpeg";
+          thumbnailFilename = part.filename ?? thumbnailFilename;
+          thumbnailBuffer = await part.toBuffer();
+        }
+      }
+    } catch (e) {
+      request.log.error(
+        { err: e, clipId, errorCode: "invalid_multipart", phase: "validation" },
+        "thumbnail_upload_failed",
+      );
+      return reply.status(400).send({
+        error: "invalid_multipart",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+
+    const validation = validateThumbnailFile({
+      buffer: thumbnailBuffer ?? Buffer.alloc(0),
+      mimeType: thumbnailMime,
+      filename: thumbnailFilename,
+      maxBytes: env.clips.maxThumbnailBytes,
+    });
+
+    if (!validation.ok) {
+      request.log.warn(
+        { clipId, errorCode: validation.errorCode, phase: "validation" },
+        "thumbnail_upload_failed",
+      );
+      const status = validation.errorCode === "file_too_large" ? 413 : 415;
+      return reply.status(status).send({
+        error: validation.errorCode,
+        message: validation.message,
+      });
+    }
+
+    try {
+      const clip = await findVideoClipById(clipId);
+      if (!clip) {
+        request.log.warn({ clipId, errorCode: "clip_not_found", phase: "validation" }, "thumbnail_upload_failed");
+        return reply.status(404).send({
+          error: "clip_not_found",
+          message: "Clipe não encontrado.",
+        });
+      }
+
+      request.log.info(
+        {
+          clipId,
+          bytes: thumbnailBuffer!.length,
+          mimeType: validation.normalizedMime,
+        },
+        "thumbnail_upload_started",
+      );
+
+      const thumbnailUpload = await uploadThumbnailForClip(
+        {
+          clientId: clip.clientId,
+          recordedAt: clip.recordedAt,
+          kitLabel: clip.kitLabel,
+          qrCodeId: clip.qrCodeId,
+          clipId,
+        },
+        thumbnailBuffer!,
+      );
+
+      request.log.info(
+        { clipId, key: thumbnailUpload.thumbnailFileKey },
+        "thumbnail_upload_s3_success",
+      );
+
+      const row = await updateVideoClipThumbnail(
+        clipId,
+        thumbnailUpload.thumbnailFileKey,
+        thumbnailUpload.thumbnailFileUrl,
+      );
+
+      if (!row) {
+        request.log.error(
+          { clipId, errorCode: "thumbnail_update_failed", phase: "database" },
+          "thumbnail_upload_failed",
+        );
+        return reply.status(500).send({
+          error: "thumbnail_update_failed",
+          message: "Falha ao salvar thumbnail no banco.",
+        });
+      }
+
+      const thumbnailUrl = await createSignedThumbnailUrl(thumbnailUpload.thumbnailFileKey);
+      request.log.info({ clipId, urlPresent: true }, "thumbnail_url_generated");
+      request.log.info({ clipId }, "thumbnail_upload_completed");
+
+      return reply.send({
+        clipId,
+        thumbnailUrl,
+      });
+    } catch (e) {
+      const errorCode =
+        e instanceof Error && e.message === "aws_credentials_missing"
+          ? "aws_credentials_missing"
+          : "thumbnail_upload_failed";
+      request.log.error(
+        { err: e, clipId, errorCode, phase: "s3" },
+        "thumbnail_upload_failed",
+      );
+      return reply.status(500).send({
+        error: errorCode,
         message: e instanceof Error ? e.message : String(e),
       });
     }

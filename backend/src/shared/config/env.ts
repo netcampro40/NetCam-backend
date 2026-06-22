@@ -12,6 +12,7 @@ export const env = {
   },
   clips: {
     maxUploadBytes: 500 * 1024 * 1024,
+    maxThumbnailBytes: 2 * 1024 * 1024,
   },
 };
 

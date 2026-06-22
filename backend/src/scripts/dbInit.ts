@@ -46,6 +46,10 @@ async function main() {
     resolve(process.cwd(), "sql/009_video_clips_original_preview.sql"),
     "utf-8",
   );
+  const videoClipsThumbnailSql = readFileSync(
+    resolve(process.cwd(), "sql/010_video_clips_thumbnail.sql"),
+    "utf-8",
+  );
 
   try {
     await pool.query(migrateArenasSql);
@@ -56,9 +60,10 @@ async function main() {
     await pool.query(videoClipsSql);
     await pool.query(videoClipsRecordedAtSql);
     await pool.query(videoClipsOriginalPreviewSql);
+    await pool.query(videoClipsThumbnailSql);
     await pool.query(seedSql);
     console.log(
-      "Database: migrate arenas → init clients → address → backfill → QR codes → video clips → recorded_at → original/preview → seed — OK.",
+      "Database: migrate arenas → init clients → address → backfill → QR codes → video clips → recorded_at → original/preview → thumbnail → seed — OK.",
     );
   } finally {
     await pool.end();

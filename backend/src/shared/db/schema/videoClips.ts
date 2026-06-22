@@ -29,6 +29,8 @@ export const videoClips = pgTable(
     originalFileUrl: text("original_file_url"),
     previewFileKey: text("preview_file_key"),
     previewFileUrl: text("preview_file_url"),
+    thumbnailFileKey: text("thumbnail_file_key"),
+    thumbnailFileUrl: text("thumbnail_file_url"),
     originalFilename: text("original_filename").notNull().default(""),
     mimeType: text("mime_type").notNull().default(""),
     sizeBytes: bigint("size_bytes", { mode: "number" }).notNull().default(0),

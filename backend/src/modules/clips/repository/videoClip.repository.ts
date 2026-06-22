@@ -14,6 +14,8 @@ export type VideoClipRow = {
   originalFileUrl: string | null;
   previewFileKey: string | null;
   previewFileUrl: string | null;
+  thumbnailFileKey: string | null;
+  thumbnailFileUrl: string | null;
   originalFilename: string;
   mimeType: string;
   sizeBytes: number;
@@ -39,6 +41,8 @@ const rowSelect = {
   originalFileUrl: videoClips.originalFileUrl,
   previewFileKey: videoClips.previewFileKey,
   previewFileUrl: videoClips.previewFileUrl,
+  thumbnailFileKey: videoClips.thumbnailFileKey,
+  thumbnailFileUrl: videoClips.thumbnailFileUrl,
   originalFilename: videoClips.originalFilename,
   mimeType: videoClips.mimeType,
   sizeBytes: videoClips.sizeBytes,
@@ -128,6 +132,22 @@ export async function updateVideoClipPreview(
     .set({
       previewFileKey,
       previewFileUrl,
+    })
+    .where(eq(videoClips.id, clipId))
+    .returning(rowSelect);
+  return row ?? null;
+}
+
+export async function updateVideoClipThumbnail(
+  clipId: string,
+  thumbnailFileKey: string,
+  thumbnailFileUrl: string,
+): Promise<VideoClipRow | null> {
+  const [row] = await db
+    .update(videoClips)
+    .set({
+      thumbnailFileKey,
+      thumbnailFileUrl,
     })
     .where(eq(videoClips.id, clipId))
     .returning(rowSelect);
