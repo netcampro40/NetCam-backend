@@ -111,6 +111,56 @@ Mesmas regras da Galeria Online e do `/play`: `clipId` UUID válido e clipe exis
 - `original_download_url_generated` (`urlPresent=true`, `expiresIn`, `sizeBytes`)
 - `original_download_url_failed` (`phase=validation|database|s3`)
 
+### Retenção na nuvem (7 dias)
+
+Clipes totalmente sincronizados (`upload_status = uploaded`) são mantidos por **7 dias completos** a partir de `uploaded_at` (conclusão do upload na nuvem), em UTC. Não usa `recorded_at`, para não penalizar uploads atrasados por falta de Wi-Fi.
+
+Após expirar, um job remove do S3:
+
+- original;
+- preview (se existir);
+- thumbnail (se existir);
+
+e exclui o registro do banco (**hard delete**, padrão do projeto). Cortes feitos no iOS permanecem apenas na Fototeca local — não há arquivo de corte remoto.
+
+**Comando**
+
+```bash
+npm run cleanup:expired-clips
+```
+
+**Dry-run (sem apagar nada)**
+
+```bash
+npm run cleanup:expired-clips -- --dry-run
+```
+
+**Render Cron Job (configurar no painel)**
+
+| Campo | Valor |
+|-------|--------|
+| Tipo | Cron Job |
+| Comando | `npm run cleanup:expired-clips` |
+| Diretório | `backend` (raiz do serviço) |
+| Agenda | `0 3 * * *` (diário, 03:00 UTC) |
+| Variáveis | Reutilizar `DATABASE_URL`, `AWS_*` do web service |
+
+Não há `render.yaml` no repositório — o cron deve ser criado manualmente no Render.
+
+**Logs**
+
+- `expired_clip_cleanup_started`
+- `expired_clip_cleanup_batch_loaded`
+- `expired_clip_cleanup_item_started`
+- `expired_clip_cleanup_s3_object_deleted`
+- `expired_clip_cleanup_item_completed`
+- `expired_clip_cleanup_item_failed`
+- `expired_clip_cleanup_finished`
+
+**Falhas parciais:** S3 falhou → registro permanece para retry; objeto ausente → idempotente; um clipe com falha não interrompe o lote.
+
+**Lifecycle S3 opcional:** regra de segurança com expiração > 10 dias pode complementar o job, mas não substitui a limpeza do banco.
+
 ## API admin (painel web)
 
 Prefixo: `/api/admin`

@@ -13,6 +13,7 @@ export const env = {
   clips: {
     maxUploadBytes: 500 * 1024 * 1024,
     maxThumbnailBytes: 2 * 1024 * 1024,
+    retentionDays: Number(process.env.CLIP_RETENTION_DAYS ?? 7),
   },
 };
 

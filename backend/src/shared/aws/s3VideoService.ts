@@ -1,4 +1,4 @@
-import { GetObjectCommand, HeadBucketCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { Upload } from "@aws-sdk/lib-storage";
 import { env, hasAwsCredentials } from "../config/env.js";
@@ -121,6 +121,34 @@ export function buildClipThumbnailS3Key(
   const date = formatRecordedDateUtc(recordedAt);
   const safeKit = slugifyKitSegment(kitSegment, null);
   return `clients/${clientId}/${date}/${safeKit}/${clipId}_thumbnail.jpg`;
+}
+
+export async function deleteS3Object(key: string): Promise<"deleted" | "already_missing"> {
+  const client = getS3Client();
+  try {
+    await client.send(
+      new DeleteObjectCommand({
+        Bucket: env.aws.s3Bucket,
+        Key: key,
+      }),
+    );
+    return "deleted";
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "";
+    const status =
+      typeof error === "object" &&
+      error !== null &&
+      "$metadata" in error &&
+      typeof (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode ===
+        "number"
+        ? (error as { $metadata: { httpStatusCode: number } }).$metadata.httpStatusCode
+        : undefined;
+
+    if (name === "NoSuchKey" || name === "NotFound" || status === 404) {
+      return "already_missing";
+    }
+    throw error;
+  }
 }
 
 export function buildPrivateS3Uri(bucket: string, key: string): string {

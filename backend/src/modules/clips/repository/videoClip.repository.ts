@@ -154,6 +154,25 @@ export async function updateVideoClipThumbnail(
   return row ?? null;
 }
 
+export async function deleteVideoClipById(clipId: string): Promise<boolean> {
+  const result = await db.delete(videoClips).where(eq(videoClips.id, clipId)).returning({ id: videoClips.id });
+  return result.length > 0;
+}
+
+export async function listExpiredUploadedClips(
+  cutoffUploadedBefore: Date,
+  limit: number,
+  offset: number,
+): Promise<VideoClipRow[]> {
+  return db
+    .select(rowSelect)
+    .from(videoClips)
+    .where(and(eq(videoClips.uploadStatus, "uploaded"), lt(videoClips.uploadedAt, cutoffUploadedBefore)))
+    .orderBy(asc(videoClips.uploadedAt))
+    .limit(limit)
+    .offset(offset);
+}
+
 export type ArenaClipsSummary = {
   clientId: string;
   arenaName: string;
