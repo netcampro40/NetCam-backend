@@ -19,6 +19,7 @@ import {
 import { validateClipUploadByQrToken } from "../application/validateClipUpload.usecase.js";
 import { resolveClipPlaybackFile } from "../application/resolveClipPlaybackFile.js";
 import { resolveClipOriginalFile } from "../application/resolveClipOriginalFile.js";
+import { isClipAvailableToClient } from "../application/clipUploadStatus.js";
 import { sanitizeDownloadFileName } from "../application/sanitizeDownloadFileName.js";
 import { uploadThumbnailForClip } from "../application/uploadThumbnailForClip.js";
 import { serializeGalleryClipsResponse } from "../application/serializeGalleryClipResponse.js";
@@ -310,7 +311,7 @@ export async function clipsRoutes(app: FastifyInstance) {
 
     try {
       const clip = await findVideoClipById(clipId);
-      if (!clip) {
+      if (!isClipAvailableToClient(clip)) {
         request.log.warn(
           { clipId, errorCode: "clip_not_found", phase: "database" },
           "original_download_url_failed",
@@ -403,7 +404,7 @@ export async function clipsRoutes(app: FastifyInstance) {
 
     try {
       const clip = await findVideoClipById(clipId);
-      if (!clip) {
+      if (!isClipAvailableToClient(clip)) {
         request.log.warn({ clipId }, "clip_play_url_failed");
         return reply.status(404).send({
           error: "clip_not_found",

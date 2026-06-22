@@ -1,6 +1,10 @@
-import { and, asc, count, desc, eq, gte, lt, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, lt, or, sql } from "drizzle-orm";
 import { db } from "../../../shared/db/client.js";
 import { videoClips } from "../../../shared/db/schema/videoClips.js";
+import {
+  CLIP_UPLOAD_STATUS_DELETING,
+  CLIP_UPLOAD_STATUS_UPLOADED,
+} from "../application/clipUploadStatus.js";
 
 export type VideoClipRow = {
   id: string;
@@ -113,7 +117,7 @@ export async function listVideoClipsByClientId(clientId: string): Promise<VideoC
   return db
     .select(rowSelect)
     .from(videoClips)
-    .where(eq(videoClips.clientId, clientId))
+    .where(and(eq(videoClips.clientId, clientId), eq(videoClips.uploadStatus, CLIP_UPLOAD_STATUS_UPLOADED)))
     .orderBy(desc(videoClips.recordedAt));
 }
 
@@ -159,7 +163,16 @@ export async function deleteVideoClipById(clipId: string): Promise<boolean> {
   return result.length > 0;
 }
 
-export async function listExpiredUploadedClips(
+export async function claimClipForDeletion(clipId: string): Promise<boolean> {
+  const result = await db
+    .update(videoClips)
+    .set({ uploadStatus: CLIP_UPLOAD_STATUS_DELETING })
+    .where(and(eq(videoClips.id, clipId), eq(videoClips.uploadStatus, CLIP_UPLOAD_STATUS_UPLOADED)))
+    .returning({ id: videoClips.id });
+  return result.length > 0;
+}
+
+export async function listClipsForRetentionCleanup(
   cutoffUploadedBefore: Date,
   limit: number,
   offset: number,
@@ -167,10 +180,27 @@ export async function listExpiredUploadedClips(
   return db
     .select(rowSelect)
     .from(videoClips)
-    .where(and(eq(videoClips.uploadStatus, "uploaded"), lt(videoClips.uploadedAt, cutoffUploadedBefore)))
+    .where(
+      or(
+        and(
+          eq(videoClips.uploadStatus, CLIP_UPLOAD_STATUS_UPLOADED),
+          lt(videoClips.uploadedAt, cutoffUploadedBefore),
+        ),
+        eq(videoClips.uploadStatus, CLIP_UPLOAD_STATUS_DELETING),
+      ),
+    )
     .orderBy(asc(videoClips.uploadedAt))
     .limit(limit)
     .offset(offset);
+}
+
+/** @deprecated Use listClipsForRetentionCleanup */
+export async function listExpiredUploadedClips(
+  cutoffUploadedBefore: Date,
+  limit: number,
+  offset: number,
+): Promise<VideoClipRow[]> {
+  return listClipsForRetentionCleanup(cutoffUploadedBefore, limit, offset);
 }
 
 export type ArenaClipsSummary = {
@@ -187,7 +217,7 @@ export async function listArenasWithClips(): Promise<ArenaClipsSummary[]> {
       totalClips: count(),
     })
     .from(videoClips)
-    .where(eq(videoClips.uploadStatus, "uploaded"))
+    .where(eq(videoClips.uploadStatus, CLIP_UPLOAD_STATUS_UPLOADED))
     .groupBy(videoClips.clientId, videoClips.arenaName)
     .orderBy(videoClips.arenaName);
 
@@ -212,7 +242,7 @@ export async function listKitsWithClipsByClientId(clientId: string): Promise<Kit
       totalClips: count(),
     })
     .from(videoClips)
-    .where(and(eq(videoClips.clientId, clientId), eq(videoClips.uploadStatus, "uploaded")))
+    .where(and(eq(videoClips.clientId, clientId), eq(videoClips.uploadStatus, CLIP_UPLOAD_STATUS_UPLOADED)))
     .groupBy(videoClips.qrCodeId, videoClips.kitLabel)
     .orderBy(videoClips.kitLabel);
 
@@ -242,7 +272,7 @@ export async function listClipDatesByClientAndKit(
       and(
         eq(videoClips.clientId, clientId),
         eq(videoClips.qrCodeId, qrCodeId),
-        eq(videoClips.uploadStatus, "uploaded"),
+        eq(videoClips.uploadStatus, CLIP_UPLOAD_STATUS_UPLOADED),
       ),
     )
     .groupBy(sql`to_char(${videoClips.recordedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD')`)
@@ -278,7 +308,7 @@ export async function listClipsByClientKitAndDate(
       and(
         eq(videoClips.clientId, clientId),
         eq(videoClips.qrCodeId, qrCodeId),
-        eq(videoClips.uploadStatus, "uploaded"),
+        eq(videoClips.uploadStatus, CLIP_UPLOAD_STATUS_UPLOADED),
         gte(videoClips.recordedAt, range.start),
         lt(videoClips.recordedAt, range.end),
       ),

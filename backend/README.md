@@ -113,7 +113,11 @@ Mesmas regras da Galeria Online e do `/play`: `clipId` UUID válido e clipe exis
 
 ### Retenção na nuvem (7 dias)
 
-Clipes totalmente sincronizados (`upload_status = uploaded`) são mantidos por **7 dias completos** a partir de `uploaded_at` (conclusão do upload na nuvem), em UTC. Não usa `recorded_at`, para não penalizar uploads atrasados por falta de Wi-Fi.
+Clipes totalmente sincronizados (`upload_status = uploaded`) são mantidos por **7 dias completos** a partir de `uploaded_at`, em UTC. Não usa `recorded_at`, para não penalizar uploads atrasados por falta de Wi-Fi.
+
+**Semântica de `uploaded_at`:** o registro é inserido em `POST /api/clips/upload` somente depois do upload do original no S3 (e do preview, quando enviado no mesmo multipart). `uploaded_at` recebe `NOW()` no insert e **não é atualizado** por `POST /:clipId/preview` nem `POST /:clipId/thumbnail`. A retenção conta, portanto, desde a disponibilização do clipe na Galeria Online (insert com status `uploaded`), não desde a gravação local nem desde uploads posteriores de preview/thumbnail.
+
+Durante a limpeza, clipes expirados passam para `upload_status = deleting` **antes** das exclusões no S3. Nesse estado não aparecem na galeria e `/play`/`/download` retornam `clip_not_found`. Falhas parciais mantêm `deleting` para retomada na próxima execução.
 
 Após expirar, um job remove do S3:
 
@@ -151,13 +155,15 @@ Não há `render.yaml` no repositório — o cron deve ser criado manualmente no
 
 - `expired_clip_cleanup_started`
 - `expired_clip_cleanup_batch_loaded`
+- `expired_clip_cleanup_item_claimed`
+- `expired_clip_cleanup_item_resumed`
 - `expired_clip_cleanup_item_started`
 - `expired_clip_cleanup_s3_object_deleted`
 - `expired_clip_cleanup_item_completed`
 - `expired_clip_cleanup_item_failed`
 - `expired_clip_cleanup_finished`
 
-**Falhas parciais:** S3 falhou → registro permanece para retry; objeto ausente → idempotente; um clipe com falha não interrompe o lote.
+**Falhas parciais:** o clipe permanece em `deleting` (nunca volta para `uploaded`); S3 falhou → retry na próxima execução; objeto ausente → idempotente; um clipe com falha não interrompe o lote.
 
 **Lifecycle S3 opcional:** regra de segurança com expiração > 10 dias pode complementar o job, mas não substitui a limpeza do banco.
 

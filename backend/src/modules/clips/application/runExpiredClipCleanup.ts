@@ -1,9 +1,11 @@
 import type { VideoClipRow } from "../repository/videoClip.repository.js";
 import { collectClipDeletionObjects } from "./collectClipDeletionObjects.js";
 import { computeRetentionCutoff } from "./clipRetention.js";
+import { CLIP_UPLOAD_STATUS_DELETING, CLIP_UPLOAD_STATUS_UPLOADED } from "./clipUploadStatus.js";
 import {
+  claimClipForDeletion,
   deleteVideoClipById,
-  listExpiredUploadedClips,
+  listClipsForRetentionCleanup,
 } from "../repository/videoClip.repository.js";
 import { deleteS3Object } from "../../../shared/aws/s3VideoService.js";
 import { env, hasAwsCredentials } from "../../../shared/config/env.js";
@@ -70,6 +72,45 @@ async function deleteClipObjects(
   return { deletedObjectCount, failed };
 }
 
+async function prepareClipForDeletion(
+  clip: VideoClipRow,
+  dryRun: boolean,
+  log: Logger,
+): Promise<"proceed" | "skip" | "dry_run"> {
+  if (dryRun) {
+    return "dry_run";
+  }
+
+  if (clip.uploadStatus === CLIP_UPLOAD_STATUS_UPLOADED) {
+    const claimed = await claimClipForDeletion(clip.id);
+    if (!claimed) {
+      return "skip";
+    }
+    log.info(
+      JSON.stringify({
+        msg: "expired_clip_cleanup_item_claimed",
+        clipId: clip.id,
+        previousStatus: CLIP_UPLOAD_STATUS_UPLOADED,
+        newStatus: CLIP_UPLOAD_STATUS_DELETING,
+      }),
+    );
+    return "proceed";
+  }
+
+  if (clip.uploadStatus === CLIP_UPLOAD_STATUS_DELETING) {
+    log.info(
+      JSON.stringify({
+        msg: "expired_clip_cleanup_item_resumed",
+        clipId: clip.id,
+        status: CLIP_UPLOAD_STATUS_DELETING,
+      }),
+    );
+    return "proceed";
+  }
+
+  return "skip";
+}
+
 export async function runExpiredClipCleanup(
   options: ExpiredClipCleanupOptions = {},
 ): Promise<ExpiredClipCleanupResult> {
@@ -101,7 +142,7 @@ export async function runExpiredClipCleanup(
   }
 
   while (true) {
-    const batch = await listExpiredUploadedClips(cutoff, batchSize, dryRun ? offset : 0);
+    const batch = await listClipsForRetentionCleanup(cutoff, batchSize, dryRun ? offset : 0);
     if (batch.length === 0) break;
 
     log.info(
@@ -122,6 +163,11 @@ export async function runExpiredClipCleanup(
           uploadedAt: clip.uploadedAt.toISOString(),
         }),
       );
+
+      const preparation = await prepareClipForDeletion(clip, dryRun, log);
+      if (preparation === "skip") {
+        continue;
+      }
 
       const { deletedObjectCount, failed: s3Failed } = await deleteClipObjects(clip, dryRun, log);
       if (s3Failed) {
