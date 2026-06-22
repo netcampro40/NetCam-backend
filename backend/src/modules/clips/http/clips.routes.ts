@@ -9,13 +9,17 @@ import {
   buildPrivateS3Uri,
   checkS3BucketAccess,
   CLIP_PLAY_URL_EXPIRES_SECONDS,
+  CLIP_ORIGINAL_DOWNLOAD_URL_EXPIRES_SECONDS,
   createSignedClipPlayUrl,
+  createSignedClipOriginalDownloadUrl,
   createSignedThumbnailUrl,
   slugifyKitSegment,
   uploadVideoToS3,
 } from "../../../shared/aws/s3VideoService.js";
 import { validateClipUploadByQrToken } from "../application/validateClipUpload.usecase.js";
 import { resolveClipPlaybackFile } from "../application/resolveClipPlaybackFile.js";
+import { resolveClipOriginalFile } from "../application/resolveClipOriginalFile.js";
+import { sanitizeDownloadFileName } from "../application/sanitizeDownloadFileName.js";
 import { uploadThumbnailForClip } from "../application/uploadThumbnailForClip.js";
 import { serializeGalleryClipsResponse } from "../application/serializeGalleryClipResponse.js";
 import { validateThumbnailFile } from "../application/validateThumbnailFile.js";
@@ -263,6 +267,106 @@ export async function clipsRoutes(app: FastifyInstance) {
       request.log.error({ err: e, clientId }, "list_clips_failed");
       return reply.status(500).send({
         error: "list_clips_failed",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  });
+
+  app.get("/:clipId/download", async (request, reply) => {
+    const clipId = ((request.params as { clipId: string }).clipId ?? "").trim();
+
+    if (!clipId) {
+      request.log.warn(
+        { clipId, errorCode: "clip_id_required", phase: "validation" },
+        "original_download_url_failed",
+      );
+      return reply.status(400).send({
+        error: "clip_id_required",
+        message: "clipId é obrigatório.",
+      });
+    }
+
+    if (!CLIP_ID_UUID_REGEX.test(clipId)) {
+      request.log.warn(
+        { clipId, errorCode: "invalid_clip_id", phase: "validation" },
+        "original_download_url_failed",
+      );
+      return reply.status(400).send({
+        error: "invalid_clip_id",
+        message: "clipId inválido.",
+      });
+    }
+
+    if (!hasAwsCredentials()) {
+      request.log.warn(
+        { clipId, errorCode: "aws_credentials_missing", phase: "s3" },
+        "original_download_url_failed",
+      );
+      return reply.status(503).send({
+        error: "aws_credentials_missing",
+        message: "Download indisponível: credenciais AWS não configuradas.",
+      });
+    }
+
+    try {
+      const clip = await findVideoClipById(clipId);
+      if (!clip) {
+        request.log.warn(
+          { clipId, errorCode: "clip_not_found", phase: "database" },
+          "original_download_url_failed",
+        );
+        return reply.status(404).send({
+          error: "clip_not_found",
+          message: "Clipe não encontrado.",
+        });
+      }
+
+      request.log.info({ clipId, authenticatedClientId: clip.clientId }, "original_download_url_requested");
+
+      const original = resolveClipOriginalFile(clip);
+      if (!original) {
+        request.log.warn(
+          { clipId, errorCode: "original_file_missing", phase: "database" },
+          "original_download_url_failed",
+        );
+        return reply.status(422).send({
+          error: "original_file_missing",
+          message: "Clipe sem arquivo original configurado para download.",
+        });
+      }
+
+      const fileName = sanitizeDownloadFileName(clip.originalFilename);
+      const downloadUrl = await createSignedClipOriginalDownloadUrl(original.fileKey, {
+        contentType: clip.mimeType || undefined,
+        fileName,
+      });
+
+      request.log.info(
+        {
+          clipId,
+          urlPresent: true,
+          expiresIn: CLIP_ORIGINAL_DOWNLOAD_URL_EXPIRES_SECONDS,
+          sizeBytes: clip.sizeBytes,
+        },
+        "original_download_url_generated",
+      );
+
+      return reply.send({
+        clipId,
+        downloadUrl,
+        source: "original",
+        expiresIn: CLIP_ORIGINAL_DOWNLOAD_URL_EXPIRES_SECONDS,
+        sizeBytes: clip.sizeBytes,
+        contentType: clip.mimeType,
+        fileName,
+      });
+    } catch (e) {
+      request.log.error(
+        { err: e, clipId, errorCode: "original_download_url_failed", phase: "s3" },
+        "original_download_url_failed",
+      );
+      return reply.status(500).send({
+        error: "original_download_url_failed",
         message: e instanceof Error ? e.message : String(e),
       });
     }

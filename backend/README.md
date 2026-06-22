@@ -66,6 +66,51 @@ Cada item em `clips[]` inclui:
 
 O endpoint `GET /api/clips/:clipId/play` **não muda**: continua retornando `playUrl` do preview (ou original como fallback).
 
+### Download do original (corte no app)
+
+`GET /api/clips/:clipId/download`
+
+Fornece URL assinada temporária **somente do arquivo original** em alta qualidade. O backend não realiza corte; o aplicativo baixa o original e aplica o intervalo escolhido localmente.
+
+**Autenticação**
+
+Mesmas regras da Galeria Online e do `/play`: `clipId` UUID válido e clipe existente. Não envie `clientId` do app para autorização — o acesso é resolvido pelo registro do clipe no banco.
+
+**Resposta 200**
+
+```json
+{
+  "clipId": "uuid",
+  "downloadUrl": "https://...",
+  "source": "original",
+  "expiresIn": 900,
+  "sizeBytes": 108000000,
+  "contentType": "video/mp4",
+  "fileName": "clip.mp4"
+}
+```
+
+- `downloadUrl`: presigned GET direto no S3 (15 minutos)
+- `sizeBytes`: do banco (`size_bytes`), sem HEAD no S3
+- Preview e thumbnail **nunca** são usados como fallback
+
+**Erros comuns**
+
+| HTTP | `error` | Descrição |
+|------|---------|-----------|
+| 400 | `clip_id_required` | clipId ausente |
+| 400 | `invalid_clip_id` | UUID inválido |
+| 404 | `clip_not_found` | Clipe inexistente |
+| 422 | `original_file_missing` | Sem `original_file_key` nem `file_key` legado |
+| 500 | `original_download_url_failed` | Falha ao assinar URL |
+| 503 | `aws_credentials_missing` | AWS não configurada |
+
+**Logs**
+
+- `original_download_url_requested` (`clipId`, `authenticatedClientId`)
+- `original_download_url_generated` (`urlPresent=true`, `expiresIn`, `sizeBytes`)
+- `original_download_url_failed` (`phase=validation|database|s3`)
+
 ## API admin (painel web)
 
 Prefixo: `/api/admin`

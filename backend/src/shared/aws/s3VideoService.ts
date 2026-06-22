@@ -133,9 +133,42 @@ export const CLIP_PLAY_URL_EXPIRES_SECONDS = 900;
 /** Tempo de validade da URL assinada para thumbnail na listagem (1 hora). */
 export const CLIP_THUMBNAIL_URL_EXPIRES_SECONDS = 3600;
 
+/** Tempo de validade da URL assinada para download do original (15 minutos). */
+export const CLIP_ORIGINAL_DOWNLOAD_URL_EXPIRES_SECONDS = 900;
+
 /** Gera URL assinada temporária para GET do objeto no S3 (bucket privado). */
 export async function createSignedClipPlayUrl(fileKey: string): Promise<string> {
   return createSignedS3ObjectUrl(fileKey, CLIP_PLAY_URL_EXPIRES_SECONDS);
+}
+
+/** Gera URL assinada temporária para download do original no S3. */
+export async function createSignedClipOriginalDownloadUrl(
+  fileKey: string,
+  options?: {
+    contentType?: string;
+    fileName?: string;
+  },
+): Promise<string> {
+  const responseOverrides: {
+    ResponseContentType?: string;
+    ResponseContentDisposition?: string;
+  } = {};
+
+  if (options?.contentType) {
+    responseOverrides.ResponseContentType = options.contentType;
+  }
+
+  if (options?.fileName) {
+    responseOverrides.ResponseContentDisposition = `attachment; filename="${options.fileName}"`;
+  } else {
+    responseOverrides.ResponseContentDisposition = "attachment";
+  }
+
+  return createSignedS3ObjectUrl(
+    fileKey,
+    CLIP_ORIGINAL_DOWNLOAD_URL_EXPIRES_SECONDS,
+    responseOverrides,
+  );
 }
 
 /** Gera URL assinada temporária para thumbnail JPEG no S3. */
@@ -143,11 +176,19 @@ export async function createSignedThumbnailUrl(fileKey: string): Promise<string>
   return createSignedS3ObjectUrl(fileKey, CLIP_THUMBNAIL_URL_EXPIRES_SECONDS);
 }
 
-async function createSignedS3ObjectUrl(fileKey: string, expiresIn: number): Promise<string> {
+async function createSignedS3ObjectUrl(
+  fileKey: string,
+  expiresIn: number,
+  responseOverrides?: {
+    ResponseContentType?: string;
+    ResponseContentDisposition?: string;
+  },
+): Promise<string> {
   const client = getS3Client();
   const command = new GetObjectCommand({
     Bucket: env.aws.s3Bucket,
     Key: fileKey,
+    ...responseOverrides,
   });
   return getSignedUrl(client, command, { expiresIn });
 }
