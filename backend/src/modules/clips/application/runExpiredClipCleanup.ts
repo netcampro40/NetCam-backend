@@ -6,6 +6,7 @@ import {
   claimClipForDeletion,
   deleteVideoClipById,
   listClipsForRetentionCleanup,
+  type RetentionCleanupCursor,
 } from "../repository/videoClip.repository.js";
 import { deleteS3Object } from "../../../shared/aws/s3VideoService.js";
 import { env, hasAwsCredentials } from "../../../shared/config/env.js";
@@ -125,7 +126,7 @@ export async function runExpiredClipCleanup(
   let scannedCount = 0;
   let completedCount = 0;
   let failedCount = 0;
-  let offset = 0;
+  let cursor: RetentionCleanupCursor = null;
 
   log.info(
     JSON.stringify({
@@ -142,14 +143,19 @@ export async function runExpiredClipCleanup(
   }
 
   while (true) {
-    const batch = await listClipsForRetentionCleanup(cutoff, batchSize, dryRun ? offset : 0);
+    const batch = await listClipsForRetentionCleanup(cutoff, batchSize, cursor);
     if (batch.length === 0) break;
 
     log.info(
       JSON.stringify({
         msg: "expired_clip_cleanup_batch_loaded",
         count: batch.length,
-        ...(dryRun ? { offset } : {}),
+        ...(cursor
+          ? {
+              afterUploadedAt: cursor.uploadedAt.toISOString(),
+              afterClipId: cursor.id,
+            }
+          : {}),
       }),
     );
 
@@ -166,12 +172,14 @@ export async function runExpiredClipCleanup(
 
       const preparation = await prepareClipForDeletion(clip, dryRun, log);
       if (preparation === "skip") {
+        cursor = { uploadedAt: clip.uploadedAt, id: clip.id };
         continue;
       }
 
       const { deletedObjectCount, failed: s3Failed } = await deleteClipObjects(clip, dryRun, log);
       if (s3Failed) {
         failedCount += 1;
+        cursor = { uploadedAt: clip.uploadedAt, id: clip.id };
         continue;
       }
 
@@ -185,6 +193,7 @@ export async function runExpiredClipCleanup(
             dryRun: true,
           }),
         );
+        cursor = { uploadedAt: clip.uploadedAt, id: clip.id };
         continue;
       }
 
@@ -200,6 +209,7 @@ export async function runExpiredClipCleanup(
               errorCode: "clip_delete_failed",
             }),
           );
+          cursor = { uploadedAt: clip.uploadedAt, id: clip.id };
           continue;
         }
 
@@ -222,11 +232,10 @@ export async function runExpiredClipCleanup(
           }),
         );
       }
+
+      cursor = { uploadedAt: clip.uploadedAt, id: clip.id };
     }
 
-    if (dryRun) {
-      offset += batch.length;
-    }
     if (batch.length < batchSize) break;
   }
 
@@ -237,6 +246,7 @@ export async function runExpiredClipCleanup(
       scannedCount,
       completedCount,
       failedCount,
+      candidateCount: scannedCount,
       durationMs,
       dryRun,
     }),

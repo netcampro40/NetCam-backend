@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { VideoClipRow } from "../repository/videoClip.repository.js";
+import type { RetentionCleanupCursor } from "../repository/videoClip.repository.js";
 import { CLIP_UPLOAD_STATUS_DELETING, CLIP_UPLOAD_STATUS_UPLOADED } from "./clipUploadStatus.js";
 
 const { listClipsForRetentionCleanup, claimClipForDeletion, deleteVideoClipById, deleteS3Object } =
@@ -60,6 +61,38 @@ function makeRow(
   };
 }
 
+function sortForRetention(clips: VideoClipRow[]): VideoClipRow[] {
+  return [...clips].sort((a, b) => {
+    const byUploadedAt = a.uploadedAt.getTime() - b.uploadedAt.getTime();
+    if (byUploadedAt !== 0) return byUploadedAt;
+    return a.id.localeCompare(b.id);
+  });
+}
+
+function pageAfterCursor(
+  allClips: VideoClipRow[],
+  cursor: RetentionCleanupCursor,
+  limit: number,
+): VideoClipRow[] {
+  const sorted = sortForRetention(allClips);
+  const remaining =
+    cursor === null
+      ? sorted
+      : sorted.filter(
+          (clip) =>
+            clip.uploadedAt.getTime() > cursor.uploadedAt.getTime() ||
+            (clip.uploadedAt.getTime() === cursor.uploadedAt.getTime() && clip.id > cursor.id),
+        );
+  return remaining.slice(0, limit);
+}
+
+function mockCursorPagination(allClips: VideoClipRow[], batchSize = 50) {
+  listClipsForRetentionCleanup.mockImplementation(
+    async (_cutoff: Date, limit: number, cursor: RetentionCleanupCursor) =>
+      pageAfterCursor(allClips, cursor, limit ?? batchSize),
+  );
+}
+
 const silentLogger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 const now = new Date("2026-06-19T12:00:00.000Z");
 
@@ -82,20 +115,26 @@ describe("runExpiredClipCleanup", () => {
     expect(result.failedCount).toBe(0);
   });
 
-  it("dry-run does not claim, delete S3 or database", async () => {
-    listClipsForRetentionCleanup.mockResolvedValueOnce([makeRow("clip-a", "2026-06-01T00:00:00.000Z")]);
-    listClipsForRetentionCleanup.mockResolvedValueOnce([]);
+  it("dry-run visits each candidate once and reports total count", async () => {
+    const candidates = [
+      makeRow("clip-a", "2026-06-01T00:00:00.000Z"),
+      makeRow("clip-b", "2026-06-02T00:00:00.000Z"),
+      makeRow("clip-c", "2026-06-03T00:00:00.000Z"),
+    ];
+    mockCursorPagination(candidates, 2);
 
-    const result = await runExpiredClipCleanup({ dryRun: true, now, logger: silentLogger });
+    const result = await runExpiredClipCleanup({ dryRun: true, now, batchSize: 2, logger: silentLogger });
 
-    expect(result.completedCount).toBe(1);
+    expect(result.scannedCount).toBe(3);
+    expect(result.completedCount).toBe(3);
     expect(claimClipForDeletion).not.toHaveBeenCalled();
     expect(deleteS3Object).not.toHaveBeenCalled();
     expect(deleteVideoClipById).not.toHaveBeenCalled();
+    expect(listClipsForRetentionCleanup).toHaveBeenCalledTimes(2);
   });
 
   it("claims uploaded clip before S3 delete", async () => {
-    listClipsForRetentionCleanup.mockResolvedValueOnce([makeRow("clip-b", "2026-06-01T00:00:00.000Z")]);
+    mockCursorPagination([makeRow("clip-b", "2026-06-01T00:00:00.000Z")]);
 
     await runExpiredClipCleanup({ now, logger: silentLogger });
 
@@ -107,49 +146,44 @@ describe("runExpiredClipCleanup", () => {
     );
   });
 
-  it("skips uploaded clip when atomic claim fails", async () => {
-    listClipsForRetentionCleanup.mockResolvedValueOnce([makeRow("clip-race", "2026-06-01T00:00:00.000Z")]);
-    claimClipForDeletion.mockResolvedValueOnce(false);
+  it("skips uploaded clip when atomic claim fails but advances cursor", async () => {
+    mockCursorPagination([
+      makeRow("clip-race", "2026-06-01T00:00:00.000Z"),
+      makeRow("clip-next", "2026-06-02T00:00:00.000Z"),
+    ]);
+    claimClipForDeletion.mockImplementation(async (id: string) => id !== "clip-race");
+
+    const result = await runExpiredClipCleanup({ now, logger: silentLogger });
+
+    expect(result.scannedCount).toBe(2);
+    expect(result.completedCount).toBe(1);
+    expect(deleteVideoClipById).toHaveBeenCalledWith("clip-next");
+    expect(deleteVideoClipById).not.toHaveBeenCalledWith("clip-race");
+  });
+
+  it("attempts a failing deleting clip only once per execution", async () => {
+    mockCursorPagination([
+      makeRow("clip-fail", "2026-06-01T00:00:00.000Z", CLIP_UPLOAD_STATUS_DELETING),
+    ]);
+    deleteS3Object.mockRejectedValue(new Error("s3_down"));
 
     const result = await runExpiredClipCleanup({ now, logger: silentLogger });
 
     expect(result.scannedCount).toBe(1);
-    expect(result.completedCount).toBe(0);
-    expect(deleteS3Object).not.toHaveBeenCalled();
-    expect(deleteVideoClipById).not.toHaveBeenCalled();
-  });
-
-  it("resumes deleting clip without claim", async () => {
-    listClipsForRetentionCleanup.mockResolvedValueOnce([
-      makeRow("clip-resume", "2026-06-01T00:00:00.000Z", CLIP_UPLOAD_STATUS_DELETING),
-    ]);
-
-    const result = await runExpiredClipCleanup({ now, logger: silentLogger });
-
-    expect(claimClipForDeletion).not.toHaveBeenCalled();
-    expect(deleteS3Object).toHaveBeenCalled();
-    expect(deleteVideoClipById).toHaveBeenCalledWith("clip-resume");
-    expect(result.completedCount).toBe(1);
-  });
-
-  it("keeps deleting status when S3 delete fails after partial success", async () => {
-    listClipsForRetentionCleanup.mockResolvedValueOnce([makeRow("clip-fail", "2026-06-01T00:00:00.000Z")]);
-    deleteS3Object.mockRejectedValueOnce(new Error("s3_down"));
-
-    const result = await runExpiredClipCleanup({ now, logger: silentLogger });
-
-    expect(claimClipForDeletion).toHaveBeenCalledWith("clip-fail");
-    expect(deleteVideoClipById).not.toHaveBeenCalled();
     expect(result.failedCount).toBe(1);
+    expect(deleteVideoClipById).not.toHaveBeenCalled();
+    expect(listClipsForRetentionCleanup).toHaveBeenCalledTimes(1);
   });
 
-  it("continues batch when one clip fails S3 delete", async () => {
-    listClipsForRetentionCleanup.mockResolvedValueOnce([
-      makeRow("clip-fail", "2026-06-01T00:00:00.000Z"),
-      makeRow("clip-ok", "2026-06-01T01:00:00.000Z"),
+  it("processes the next candidate after a deleting clip fails", async () => {
+    mockCursorPagination([
+      makeRow("clip-fail", "2026-06-01T00:00:00.000Z", CLIP_UPLOAD_STATUS_DELETING),
+      makeRow("clip-ok", "2026-06-02T00:00:00.000Z"),
     ]);
-
-    deleteS3Object.mockRejectedValueOnce(new Error("s3_down"));
+    deleteS3Object.mockImplementation(async (key: string) => {
+      if (key.includes("clip-fail")) throw new Error("s3_down");
+      return "deleted";
+    });
 
     const result = await runExpiredClipCleanup({ now, logger: silentLogger });
 
@@ -159,29 +193,96 @@ describe("runExpiredClipCleanup", () => {
     expect(deleteVideoClipById).not.toHaveBeenCalledWith("clip-fail");
   });
 
-  it("retries hard delete on next run for deleting clip", async () => {
-    listClipsForRetentionCleanup.mockResolvedValueOnce([
-      makeRow("clip-db-fail", "2026-06-01T00:00:00.000Z", CLIP_UPLOAD_STATUS_DELETING),
-    ]);
-    deleteVideoClipById.mockResolvedValueOnce(false);
+  it("terminates when fifty deleting clips fail and still reaches later candidates", async () => {
+    const failingDeleting = Array.from({ length: 50 }, (_, index) =>
+      makeRow(
+        `clip-fail-${String(index).padStart(2, "0")}`,
+        `2026-06-01T00:00:${String(index).padStart(2, "0")}.000Z`,
+        CLIP_UPLOAD_STATUS_DELETING,
+      ),
+    );
+    const behind = makeRow("clip-behind", "2026-06-10T00:00:00.000Z");
+    mockCursorPagination([...failingDeleting, behind], 50);
+    deleteS3Object.mockRejectedValue(new Error("s3_down"));
 
+    const result = await runExpiredClipCleanup({ now, batchSize: 50, logger: silentLogger });
+
+    expect(result.scannedCount).toBe(51);
+    expect(result.failedCount).toBe(51);
+    expect(result.completedCount).toBe(0);
+    expect(deleteVideoClipById).not.toHaveBeenCalled();
+    expect(listClipsForRetentionCleanup).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not starve candidates behind a full batch of failures", async () => {
+    const failingDeleting = Array.from({ length: 50 }, (_, index) =>
+      makeRow(
+        `clip-fail-${String(index).padStart(2, "0")}`,
+        `2026-06-01T00:00:${String(index).padStart(2, "0")}.000Z`,
+        CLIP_UPLOAD_STATUS_DELETING,
+      ),
+    );
+    const behind = makeRow("clip-behind", "2026-06-10T00:00:00.000Z");
+    mockCursorPagination([...failingDeleting, behind], 50);
+    deleteS3Object.mockImplementation(async (key: string) => {
+      if (key.includes("clip-behind")) return "deleted";
+      throw new Error("s3_down");
+    });
+
+    const result = await runExpiredClipCleanup({ now, batchSize: 50, logger: silentLogger });
+
+    expect(result.scannedCount).toBe(51);
+    expect(result.failedCount).toBe(50);
+    expect(result.completedCount).toBe(1);
+    expect(deleteVideoClipById).toHaveBeenCalledWith("clip-behind");
+  });
+
+  it("retries the same deleting clip on a new execution", async () => {
+    const clip = makeRow("clip-db-fail", "2026-06-01T00:00:00.000Z", CLIP_UPLOAD_STATUS_DELETING);
+
+    mockCursorPagination([clip]);
+    deleteVideoClipById.mockResolvedValueOnce(false);
     const first = await runExpiredClipCleanup({ now, logger: silentLogger });
     expect(first.failedCount).toBe(1);
 
-    listClipsForRetentionCleanup.mockResolvedValueOnce([
-      makeRow("clip-db-fail", "2026-06-01T00:00:00.000Z", CLIP_UPLOAD_STATUS_DELETING),
-    ]);
+    mockCursorPagination([clip]);
     deleteVideoClipById.mockResolvedValueOnce(true);
-
     const second = await runExpiredClipCleanup({ now, logger: silentLogger });
     expect(second.completedCount).toBe(1);
     expect(claimClipForDeletion).not.toHaveBeenCalled();
   });
 
-  it("treats already missing S3 object as success path", async () => {
-    listClipsForRetentionCleanup.mockResolvedValueOnce([
-      makeRow("clip-missing", "2026-06-01T00:00:00.000Z"),
+  it("uses id as tie-breaker when uploaded_at is equal", async () => {
+    const sameTimestamp = "2026-06-01T12:00:00.000Z";
+    mockCursorPagination([
+      makeRow("clip-aaa", sameTimestamp),
+      makeRow("clip-bbb", sameTimestamp),
+      makeRow("clip-ccc", sameTimestamp),
     ]);
+
+    const result = await runExpiredClipCleanup({ now, logger: silentLogger });
+
+    expect(result.scannedCount).toBe(3);
+    expect(deleteVideoClipById).toHaveBeenCalledTimes(3);
+    const processedIds = deleteVideoClipById.mock.calls.map(([id]) => id);
+    expect(processedIds).toEqual(["clip-aaa", "clip-bbb", "clip-ccc"]);
+  });
+
+  it("does not process the same clip twice in one run", async () => {
+    const clip = makeRow("clip-once", "2026-06-01T00:00:00.000Z", CLIP_UPLOAD_STATUS_DELETING);
+    mockCursorPagination([clip]);
+    deleteVideoClipById.mockResolvedValue(false);
+
+    await runExpiredClipCleanup({ now, logger: silentLogger });
+
+    const startedLogs = silentLogger.info.mock.calls
+      .map(([payload]) => JSON.parse(String(payload)))
+      .filter((entry) => entry.msg === "expired_clip_cleanup_item_started" && entry.clipId === "clip-once");
+    expect(startedLogs).toHaveLength(1);
+  });
+
+  it("treats already missing S3 object as success path", async () => {
+    mockCursorPagination([makeRow("clip-missing", "2026-06-01T00:00:00.000Z")]);
     deleteS3Object.mockResolvedValue("already_missing");
 
     const result = await runExpiredClipCleanup({ now, logger: silentLogger });

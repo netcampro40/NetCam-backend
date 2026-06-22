@@ -163,7 +163,7 @@ Não há `render.yaml` no repositório — o cron deve ser criado manualmente no
 - `expired_clip_cleanup_item_failed`
 - `expired_clip_cleanup_finished`
 
-**Falhas parciais:** o clipe permanece em `deleting` (nunca volta para `uploaded`); S3 falhou → retry na próxima execução; objeto ausente → idempotente; um clipe com falha não interrompe o lote.
+**Falhas parciais:** o clipe permanece em `deleting` (nunca volta para `uploaded`); S3 falhou → retry na próxima execução; objeto ausente → idempotente; um clipe com falha não interrompe o lote. O job pagina por cursor (`uploaded_at`, `id`) e tenta cada candidato no máximo uma vez por execução.
 
 **Lifecycle S3 opcional:** regra de segurança com expiração > 10 dias pode complementar o job, mas não substitui a limpeza do banco.
 

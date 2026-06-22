@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, gte, lt, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, lt, or, sql } from "drizzle-orm";
 import { db } from "../../../shared/db/client.js";
 import { videoClips } from "../../../shared/db/schema/videoClips.js";
 import {
@@ -172,35 +172,49 @@ export async function claimClipForDeletion(clipId: string): Promise<boolean> {
   return result.length > 0;
 }
 
+export type RetentionCleanupCursor = {
+  uploadedAt: Date;
+  id: string;
+} | null;
+
+function retentionCleanupCursorCondition(cursor: RetentionCleanupCursor) {
+  if (!cursor) return undefined;
+  return or(
+    gt(videoClips.uploadedAt, cursor.uploadedAt),
+    and(eq(videoClips.uploadedAt, cursor.uploadedAt), gt(videoClips.id, cursor.id)),
+  );
+}
+
 export async function listClipsForRetentionCleanup(
   cutoffUploadedBefore: Date,
   limit: number,
-  offset: number,
+  afterCursor: RetentionCleanupCursor = null,
 ): Promise<VideoClipRow[]> {
+  const eligibility = or(
+    and(
+      eq(videoClips.uploadStatus, CLIP_UPLOAD_STATUS_UPLOADED),
+      lt(videoClips.uploadedAt, cutoffUploadedBefore),
+    ),
+    eq(videoClips.uploadStatus, CLIP_UPLOAD_STATUS_DELETING),
+  );
+  const cursorFilter = retentionCleanupCursorCondition(afterCursor);
+  const whereClause = cursorFilter ? and(eligibility, cursorFilter) : eligibility;
+
   return db
     .select(rowSelect)
     .from(videoClips)
-    .where(
-      or(
-        and(
-          eq(videoClips.uploadStatus, CLIP_UPLOAD_STATUS_UPLOADED),
-          lt(videoClips.uploadedAt, cutoffUploadedBefore),
-        ),
-        eq(videoClips.uploadStatus, CLIP_UPLOAD_STATUS_DELETING),
-      ),
-    )
-    .orderBy(asc(videoClips.uploadedAt))
-    .limit(limit)
-    .offset(offset);
+    .where(whereClause)
+    .orderBy(asc(videoClips.uploadedAt), asc(videoClips.id))
+    .limit(limit);
 }
 
 /** @deprecated Use listClipsForRetentionCleanup */
 export async function listExpiredUploadedClips(
   cutoffUploadedBefore: Date,
   limit: number,
-  offset: number,
+  afterCursor: RetentionCleanupCursor = null,
 ): Promise<VideoClipRow[]> {
-  return listClipsForRetentionCleanup(cutoffUploadedBefore, limit, offset);
+  return listClipsForRetentionCleanup(cutoffUploadedBefore, limit, afterCursor);
 }
 
 export type ArenaClipsSummary = {
