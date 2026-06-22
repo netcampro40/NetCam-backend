@@ -10,6 +10,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "cleanup:expired-clips": "tsx src/scripts/cleanupExpiredClips.ts",
+    "diagnose:database": "tsx src/scripts/diagnoseDatabaseConnection.ts",
     "db:init": "tsx src/scripts/dbInit.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate"

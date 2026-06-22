@@ -160,6 +160,16 @@ Workflow: [`.github/workflows/cleanup-expired-clips.yml`](../.github/workflows/c
 
 Logs: aba **Actions** do repositório → workflow *Cleanup expired clips* → run correspondente.
 
+**Diagnóstico de conexão PostgreSQL (somente leitura)**
+
+Workflow manual: [`.github/workflows/diagnose-database.yml`](../.github/workflows/diagnose-database.yml)
+
+```bash
+gh workflow run diagnose-database.yml -R netcampro40/NetCam-backend --ref main
+```
+
+Usa apenas o Secret `DATABASE_URL`. Registra formato sanitizado da URL, testa `SELECT 1`, contexto do banco e existência de `public.video_clips`, sem expor hostname, credenciais ou connection string.
+
 Execuções simultâneas são serializadas (`concurrency: cleanup-expired-clips`).
 
 **Logs**
