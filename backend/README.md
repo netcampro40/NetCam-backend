@@ -139,17 +139,28 @@ npm run cleanup:expired-clips
 npm run cleanup:expired-clips -- --dry-run
 ```
 
-**Render Cron Job (configurar no painel)**
+**GitHub Actions (agendado)**
 
-| Campo | Valor |
-|-------|--------|
-| Tipo | Cron Job |
-| Comando | `npm run cleanup:expired-clips` |
-| Diretório | `backend` (raiz do serviço) |
-| Agenda | `0 3 * * *` (diário, 03:00 UTC) |
-| Variáveis | Reutilizar `DATABASE_URL`, `AWS_*` do web service |
+Workflow: [`.github/workflows/cleanup-expired-clips.yml`](../.github/workflows/cleanup-expired-clips.yml)
 
-Não há `render.yaml` no repositório — o cron deve ser criado manualmente no Render.
+| Modo | Quando | Comando |
+|------|--------|---------|
+| Real | Agenda diária **03:17 UTC** | `npm run cleanup:expired-clips` |
+| Dry-run | Execução manual (`workflow_dispatch`, padrão `dry_run=true`) | `npm run cleanup:expired-clips -- --dry-run` |
+| Real manual | Execução manual com `dry_run=false` | `npm run cleanup:expired-clips` |
+
+**Secrets do repositório** (Settings → Secrets and variables → Actions):
+
+- `ADMIN_API_KEY`
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `AWS_REGION`
+- `AWS_S3_BUCKET`
+- `DATABASE_URL`
+
+Logs: aba **Actions** do repositório → workflow *Cleanup expired clips* → run correspondente.
+
+Execuções simultâneas são serializadas (`concurrency: cleanup-expired-clips`).
 
 **Logs**
 
